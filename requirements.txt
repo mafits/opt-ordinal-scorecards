@@ -8,3 +8,4 @@ scikit-learn>=1.6.1
 ucimlrepo>=0.0.7
 scipy>=1.15.2
 libsvm-official>=3.35.0
+torch>=2.6.0
