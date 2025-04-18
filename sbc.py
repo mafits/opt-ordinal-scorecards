@@ -11,8 +11,8 @@ class SBC():
     def reduction(self, X, y, h=1):
         # num of classes
         self.K = len(np.unique(y))
-        
-        print("original num classes: ", self.K)
+        print("number of features: ", X.shape[1])
+        print("original num target classes: ", self.K)
         print("original num observations: ", X.shape[0])
         
         # num of parallel hyperplanes to be created (and replicas)
@@ -40,14 +40,16 @@ class SBC():
         new_y = pd.DataFrame(new_y).reset_index(drop=True)
         new_data = pd.concat([new_X, new_y], axis=1)
         # rename binary label column
-        new_data.columns = list(new_X.columns) + ['binary_label']
+        new_data.columns = list(new_X.columns) + ['(binary_label)']
         
-        print("new num classes: ", len(np.unique(new_y)))
+        print("new num features: ", new_X.shape[1])
+        print("new num target classes: ", len(np.unique(new_y)))
         print("new num observations: ", new_X.shape[0], " (original num observations *", self.s, ")")
         
         print(new_data.head())
+        new_X_columns = new_X.columns
         
-        return new_X, new_y, new_data
+        return new_X, new_y, new_X_columns, new_data
     
     
     
