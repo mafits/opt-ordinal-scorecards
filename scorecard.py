@@ -97,17 +97,28 @@ class Scorecard():
     def discretize_caim(self):
         print("num of features: ", self.X.shape[1])
         caim = CAIMD()
-        X = self.X.copy()
-        if(self.use_sbc):
+        
+        # remove sbc_column and take care of it later
+        X_aux = self.X.copy()
+        if self.use_sbc:
             sbc_column = self.X.columns[-1]
-            X = self.X.iloc[:, -1]
-        self.thresholds = caim.fit_transform(X, self.y) # fit() and transform()
+            print("sbc_column: ", sbc_column)
+            # remove sbc_column from X_aux
+            X_aux = X_aux.drop(columns=[sbc_column])
+        
+        # get thresholds
+        self.thresholds = caim.fit_transform(X_aux, self.y) # fit() and transform()
         
         # get thresholds from caim.split_scheme (dict with column index : thresholds)
         # transform all values to floats
         # and keys with column indexes to column names
-        self.thresholds = {self.X_columns[i]: [float(val) for val in value] for i, (key, value) in enumerate(caim.split_scheme.items())}
+        self.thresholds = {X_aux.columns[i]: [float(val) for val in value] for i, (key, value) in enumerate(caim.split_scheme.items())}
         
+        # do thresholds for sbc_column = the values of the column
+        if self.use_sbc:
+            self.thresholds[sbc_column] = {float(val) for val in self.X[sbc_column]}
+        
+        # print thresholds
         if self.show_prints: print("\nthresholds ", self.thresholds)
         if self.show_prints: print("num of bins: ")
         for i, (key, value) in enumerate(self.thresholds.items()):
@@ -143,16 +154,18 @@ class Scorecard():
 
     def disc_1_out_of_k(self):
         for col in self.X_columns:
-            t = self.thresholds[col]
-            print("t ", t)
-            x = self.X[col]
-            print(x)
-            bins = self.get_bins(t,x) # gets bin number of each row
+            bins = self.get_bins(self.thresholds[col], self.X[col]) # gets bin number of each row
             bins_df = pd.get_dummies(bins, prefix=f'feat{col}-bin', prefix_sep='').astype(int) # one hot encoding
+            
+            # add missing columns
             for i in range(1, len(self.thresholds[col]) + 1):
                 if f'feat{col}-bin{i}' not in bins_df.columns:
                     bins_df[f'feat{col}-bin{i}'] = 0
+            
+            # remove first column (bin0)
             bins_df = bins_df.drop(columns=f'feat{col}-bin0', errors='ignore')
+            
+            # add bins of the column to the list
             self.X_disc.append(bins_df)
         self.X_disc = pd.concat(self.X_disc, axis=1)
     
