@@ -117,6 +117,7 @@ class Scorecard():
         # do thresholds for sbc_column = the values of the column
         if self.use_sbc:
             self.thresholds[sbc_column] = {float(val) for val in self.X[sbc_column]}
+            self.thresholds[sbc_column] = list(self.thresholds[sbc_column])
         
         # print thresholds
         if self.show_prints: print("\nthresholds ", self.thresholds)
@@ -132,8 +133,8 @@ class Scorecard():
             # sort unique values
             sorted_col = np.unique(self.X[col])
             # get thresholds
-            self.thresholds = (sorted_col[:-1] + sorted_col[1:]) / 2
-            self.thresholds[col] = self.thresholds.tolist()
+            col_thresholds = (sorted_col[:-1] + sorted_col[1:]) / 2
+            self.thresholds[col] = col_thresholds.tolist()
         
         if self.show_prints: print("\nthresholds ", self.thresholds)
         if self.show_prints: print("num of bins: ")
@@ -151,8 +152,10 @@ class Scorecard():
         bins = np.digitize(values, thresholds)
         return bins
         # list of bin number for each row
-
+        
+    # 1 out of k
     def disc_1_out_of_k(self):
+        self.X_disc = []
         for col in self.X_columns:
             bins = self.get_bins(self.thresholds[col], self.X[col]) # gets bin number of each row
             bins_df = pd.get_dummies(bins, prefix=f'feat{col}-bin', prefix_sep='').astype(int) # one hot encoding
@@ -167,15 +170,19 @@ class Scorecard():
             
             # add bins of the column to the list
             self.X_disc.append(bins_df)
+        
         self.X_disc = pd.concat(self.X_disc, axis=1)
     
+    # differential coding
     def disc_diff_coding(self):
+        self.X_disc = []
         for col in self.X_columns:
             bins = self.get_bins(self.thresholds[col], self.X[col]) # gets bin number of each row
             num_bins = len(self.thresholds[col]) + 1
             bin_df = pd.DataFrame(0, index=self.X.index, columns=[f'feat{col}-bin{i}' for i in range(1, num_bins)])
             for i in range(1, num_bins):
                 bin_df[f'feat{col}-bin{i}'] = (bins >= i).astype(int)
+            
             self.X_disc.append(bin_df)
         self.X_disc = pd.concat(self.X_disc, axis=1)
     
@@ -185,7 +192,7 @@ class Scorecard():
     # model
     def grid_search(self, model, param_grid, cv=10):
         grid_search = GridSearchCV(estimator=model, param_grid=param_grid, cv=cv)
-        grid_search.fit(self.X_disc, self.y)
+        grid_search.fit(self.X_disc, np.ravel(self.y))
         return grid_search
     
     def get_weights(self):
