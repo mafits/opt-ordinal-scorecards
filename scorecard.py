@@ -1,7 +1,8 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from sklearn.model_selection import GridSearchCV
+from sklearn.metrics import mean_squared_error, roc_auc_score
+from sklearn.model_selection import GridSearchCV, StratifiedKFold
 
 # ordinal to binary 
 from sbc import SBC
@@ -27,6 +28,8 @@ class Scorecard():
         self.X_columns = None
         self.X_disc = []
         self.y = None
+        self.og_X = None
+        self.og_y = None
         self.thresholds = None
         self.sbc = SBC()
         self.model = None
@@ -36,16 +39,17 @@ class Scorecard():
         self.use_sbc = False
 
     
-    def fit(self, X, y, thresholds_method, encoding_method, model_method, use_sbc=False, show_prints=True):
+    def fit(self, X, y, thresholds_method, encoding_method, model_method, use_sbc=False, num_nonzero_weights=None, show_prints=True):
         self.X = X
         self.X_columns = X.columns
         self.y = y
         self.show_prints = show_prints
         self.use_sbc = use_sbc
+        self.num_nonzero_weights = num_nonzero_weights 
         
         # transform from ordinal to binary
-        og_X = self.X
-        og_y = self.y
+        self.og_X = self.X
+        self.og_y = self.y
         if use_sbc:
             if show_prints: print("SBC reduction")
             self.X, self.y, self.X_columns, _ = self.sbc.reduction(self.X, self.y, h=1)
@@ -77,8 +81,8 @@ class Scorecard():
         # get nonzero weights
         self.nonzero_weights = self.weights[self.weights['Weight'] != 0]
         if self.nonzero_weights.shape[0] < self.weights.shape[0]:
-            print("num of non-zero weights: ", self.nonzero_weights.shape[0])
             print("num of zero weights: ", self.weights.shape[0] - self.nonzero_weights.shape[0])
+            print("num of non-zero weights: ", self.nonzero_weights.shape[0])
             print(self.nonzero_weights)
             plt.figure()
             plt.bar(self.nonzero_weights['Feature'], self.nonzero_weights['Weight'])
@@ -191,12 +195,16 @@ class Scorecard():
     
     # model
     def grid_search(self, model, param_grid, cv=10):
-        grid_search = GridSearchCV(estimator=model, param_grid=param_grid, cv=cv)
-        grid_search.fit(self.X_disc, np.ravel(self.y))
+        if self.num_nonzero_weights is None:
+            grid_search = GridSearchCV(estimator=model, param_grid=param_grid, cv=cv)
+            grid_search.fit(self.X_disc, np.ravel(self.y))
+        # else: 
+        # do grid search but the goal is for the number of weights to be self.num_nonzero_weights
+        
         return grid_search
     
     def get_weights(self):
-        self.model.fit(self.X_disc, self.y)
+        self.model.fit(self.X_disc,  np.ravel(self.y))
         weights = self.model.coef_[0]
         feature_names = self.X_disc.columns
         self.weights = pd.DataFrame({'Feature': feature_names, 'Weight': weights})
@@ -235,3 +243,44 @@ class Scorecard():
         grid_search_svm = self.grid_search(svm,  param_grid)
         self.model = grid_search_svm.best_estimator_
         self.weights = self.get_weights()
+        
+
+    def cross_val_score(self, n_splits=10):                   
+        kf = StratifiedKFold(n_splits=n_splits)
+        MSEs = [] # mean squared error
+        accuracies = [] 
+        AUCs = [] # area under the ROC curve
+        
+        if self.use_sbc:
+            self.model.fit(self.X, self.y)
+            y_pred_sbc = self.model.predict(self.X)
+            
+            y_pred = self.sbc.classif(y_pred_sbc)
+            y_pred.index = self.og_y.index
+            
+            MSEs.append(mean_squared_error(self.og_y, y_pred))
+            accuracies.append((y_pred == self.og_y).mean())
+            AUCs.append(roc_auc_score(self.og_y, self.model.predict_proba(X_test)[:, 1]))
+        else:
+            for train_index, test_index in kf.split(self.X, self.y):
+                X_train, X_test = self.X.iloc[train_index], self.X.iloc[test_index]
+                y_train, y_test = self.y.iloc[train_index], self.y.iloc[test_index]
+                self.model.fit(X_train, y_train)
+                y_pred = self.model.predict(X_test)
+                
+                MSEs.append(mean_squared_error(y_test, y_pred))
+                accuracies.append((y_pred == y_test).mean())
+                #AUCs.append(roc_auc_score(y_test, model.predict_proba(X_test)[:, 1]))
+                if hasattr(self.model, "predict_proba"):
+                    AUCs.append(roc_auc_score(y_test, self.model.predict_proba(X_test)[:, 1]))
+                else:
+                    AUCs.append(roc_auc_score(y_test, y_pred))
+                
+        print("MSEs: ", MSEs)
+        print("accuracies: ", accuracies)
+        print("AUCs: ", AUCs)
+        
+        print("mean MSE: ", np.mean(MSEs))
+        print("mean accuracy: ", np.mean(accuracies))
+        print("mean AUC: ", np.mean(AUCs))
+        return np.mean(MSEs), np.mean(accuracies), np.mean(AUCs)

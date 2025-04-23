@@ -6,6 +6,7 @@ class SBC():
     def __init__(self):
         self.K = None
         self.s = None
+        self.mapping = None
     
     
     def reduction(self, X, y, h=1):
@@ -22,8 +23,9 @@ class SBC():
         if not np.issubdtype(y.dtype, np.integer):
             new_y = pd.Series(pd.factorize(y)[0])
             # show the mapping
-            mapping = pd.Series(pd.factorize(y)[1], index=np.unique(new_y))
-            print("mapping: ", mapping)
+            self.mapping = pd.Series(pd.factorize(y)[1], index=np.unique(new_y))
+            self.mapping = self.mapping.reset_index(drop=True).drop_duplicates()
+            print("mapping: ", self.mapping)
             y = new_y
         
         # for each point, create s replicas each with a new feature in [0, h, h*2, ... h*(s-1)]
@@ -53,9 +55,11 @@ class SBC():
     
     
     
-    def classif(self, pred_sbc_y):
+    def classif(self, pred_sbc_y, final_index=None):
         # get classification of all replicas of each point
         all_labels = [pred_sbc_y[i:i + self.s] for i in range(0, len(pred_sbc_y), self.s)]
+        if final_index is not None:
+            all_labels = [all_labels[i] for i in final_index]
         all_labels = np.array(all_labels)
         print(all_labels)
         
@@ -66,5 +70,10 @@ class SBC():
         # ...
         # if all replicas are 1, then the class is K
         final_labels = np.argmax(all_labels, axis=1)    
+        
+        # transform back to original labels using the mapping
+        if self.mapping is not None:
+            final_labels = self.mapping.iloc[final_labels].values
+            final_labels = pd.Series(final_labels, index=np.arange(len(final_labels)))
         
         return final_labels
