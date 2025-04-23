@@ -37,6 +37,7 @@ class Scorecard():
         self.nonzero_weights = None
         self.show_prints = True
         self.use_sbc = False
+        self.goal_num_nonzero_weights = None
 
     
     def fit(self, X, y, thresholds_method, encoding_method, model_method, use_sbc=False, num_nonzero_weights=None, show_prints=True):
@@ -45,7 +46,7 @@ class Scorecard():
         self.y = y
         self.show_prints = show_prints
         self.use_sbc = use_sbc
-        self.num_nonzero_weights = num_nonzero_weights 
+        self.goal_num_nonzero_weights = num_nonzero_weights 
         
         # transform from ordinal to binary
         self.og_X = self.X
@@ -192,15 +193,20 @@ class Scorecard():
     
     
     
-    
     # model
+    def custom_scorer(self, estimator, X, y):
+        estimator.fit(X, np.ravel(y))
+        weights = estimator.coef_[0]
+        num_nonzero_weights = np.sum(weights != 0)
+        return -abs(num_nonzero_weights - self.goal_num_nonzero_weights)
+    
     def grid_search(self, model, param_grid, cv=10):
-        if self.num_nonzero_weights is None:
+        if self.goal_num_nonzero_weights is None:
             grid_search = GridSearchCV(estimator=model, param_grid=param_grid, cv=cv)
-            grid_search.fit(self.X_disc, np.ravel(self.y))
-        # else: 
-        # do grid search but the goal is for the number of weights to be self.num_nonzero_weights
+        else:
+            grid_search = GridSearchCV(estimator=model, param_grid=param_grid, cv=cv, scoring=self.custom_scorer)
         
+        grid_search.fit(self.X_disc, np.ravel(self.y))
         return grid_search
     
     def get_weights(self):
@@ -251,35 +257,35 @@ class Scorecard():
         accuracies = [] 
         AUCs = [] # area under the ROC curve
         
-        if self.use_sbc:
-            self.model.fit(self.X, self.y)
+        '''if self.use_sbc:
+            self.model.fit(self.X, np.ravel(self.y)) 
             y_pred_sbc = self.model.predict(self.X)
-            
             y_pred = self.sbc.classif(y_pred_sbc)
             y_pred.index = self.og_y.index
             
-            MSEs.append(mean_squared_error(self.og_y, y_pred))
             accuracies.append((y_pred == self.og_y).mean())
-            AUCs.append(roc_auc_score(self.og_y, self.model.predict_proba(X_test)[:, 1]))
-        else:
-            for train_index, test_index in kf.split(self.X, self.y):
-                X_train, X_test = self.X.iloc[train_index], self.X.iloc[test_index]
-                y_train, y_test = self.y.iloc[train_index], self.y.iloc[test_index]
-                self.model.fit(X_train, y_train)
-                y_pred = self.model.predict(X_test)
-                
-                MSEs.append(mean_squared_error(y_test, y_pred))
-                accuracies.append((y_pred == y_test).mean())
-                #AUCs.append(roc_auc_score(y_test, model.predict_proba(X_test)[:, 1]))
-                if hasattr(self.model, "predict_proba"):
-                    AUCs.append(roc_auc_score(y_test, self.model.predict_proba(X_test)[:, 1]))
-                else:
-                    AUCs.append(roc_auc_score(y_test, y_pred))
-                
+            print("accuracy: ", accuracies)
+            return np.mean(accuracies)
+        
+        else:'''
+        for train_index, test_index in kf.split(self.X, self.y):
+            X_train, X_test = self.X.iloc[train_index], self.X.iloc[test_index]
+            y_train, y_test = self.y.iloc[train_index], self.y.iloc[test_index]
+            self.model.fit(X_train, np.ravel(y_train))
+            y_pred = self.model.predict(X_test)
+            
+            MSEs.append(mean_squared_error(y_test, y_pred))
+            accuracies.append((np.array(y_pred) == np.array(y_test)).mean())
+            #AUCs.append(roc_auc_score(y_test, model.predict_proba(X_test)[:, 1]))
+            if hasattr(self.model, "predict_proba"):
+                AUCs.append(roc_auc_score(y_test, self.model.predict_proba(X_test)[:, 1]))
+            else:
+                AUCs.append(roc_auc_score(y_test, y_pred))
+            
         print("MSEs: ", MSEs)
         print("accuracies: ", accuracies)
         print("AUCs: ", AUCs)
-        
+    
         print("mean MSE: ", np.mean(MSEs))
         print("mean accuracy: ", np.mean(accuracies))
         print("mean AUC: ", np.mean(AUCs))
