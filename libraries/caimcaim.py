@@ -221,11 +221,11 @@ class CAIMD(BaseEstimator, TransformerMixin):
     # if the number of unique values is less than 2 * number of classes of the target variable
     # then the feature is categorical
     def check_categorical(self, X, y): 
-        categorical = []
-        ny2 = 2 * np.unique(y).shape[0]
-        for j in range(X.shape[1]):
-            xj = X[:, j]
-            xj = xj[np.invert(np.isnan(xj))]
+        categorical = [] 
+        ny2 = 2 * np.unique(y).shape[0] # 2 * number of classes of the target variable
+        for j in range(X.shape[1]): # for each feature
+            xj = X[:, j] # get the feature
+            xj = xj[np.invert(np.isnan(xj))] 
             if np.unique(xj).shape[0] < ny2:
                 categorical.append(j)
         return categorical

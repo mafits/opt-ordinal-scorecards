@@ -52,32 +52,33 @@ class Scorecard():
         self.og_X = self.X
         self.og_y = self.y
         if use_sbc:
-            if show_prints: print("SBC reduction")
+            print("SBC reduction")
             self.X, self.y, self.X_columns, _ = self.sbc.reduction(self.X, self.y, h=1)
                     
         # discretization thresholds
-        if show_prints: print('\ndiscretization thresholds')
+        print('\ndiscretization thresholds')
         if thresholds_method == "CAIM": self.discretize_caim()
         elif thresholds_method == "INF_BINS": self.discretize_infbins()
         
         # encoding
-        if show_prints: print('\nencoding')
+        print('\nencoding')
         if encoding_method == "1_OUT_OF_K": self.disc_1_out_of_k()
         elif encoding_method == "DIFF_CODING": self.disc_diff_coding()
             
         # model (get weights)
-        if show_prints: print('\nmodel')
+        print('\nmodel')
         if model_method == "RSS": self.rss()
         elif model_method == "ML": self.max_likelihood()
         elif model_method == "MARGIN_MAX": self.margin_max()
         
         # show weights
-        if show_prints: print(f"{model_method} weights:\n", self.weights)
-        plt.figure()
-        plt.bar(self.weights['Feature'], self.weights['Weight'])
-        plt.xticks(rotation=90)
-        plt.title('ML weights')
-        plt.show()
+        if show_prints: 
+            print(f"{model_method} weights:\n", self.weights)
+            plt.figure()
+            plt.bar(self.weights['Feature'], self.weights['Weight'])
+            plt.xticks(rotation=90)
+            plt.title('ML weights')
+            plt.show()
         
         # get nonzero weights
         self.nonzero_weights = self.weights[self.weights['Weight'] != 0]
@@ -100,17 +101,17 @@ class Scorecard():
     # discretization thresholds
     # CAIM
     def discretize_caim(self):
-        print("num of features: ", self.X.shape[1])
+        if self.show_prints: print("num of features: ", self.X.shape[1])
         caim = CAIMD()
         
         # remove sbc_column and take care of it later
         X_aux = self.X.copy()
         if self.use_sbc:
             sbc_column = self.X.columns[-1]
-            print("sbc_column: ", sbc_column)
+            if self.show_prints: print("sbc_column: ", sbc_column)
             # remove sbc_column from X_aux
             X_aux = X_aux.drop(columns=[sbc_column])
-        
+
         # get thresholds
         self.thresholds = caim.fit_transform(X_aux, self.y) # fit() and transform()
         
@@ -126,7 +127,7 @@ class Scorecard():
         
         # print thresholds
         if self.show_prints: print("\nthresholds ", self.thresholds)
-        if self.show_prints: print("num of bins: ")
+        print("num of bins: ")
         for i, (key, value) in enumerate(self.thresholds.items()):
             if self.show_prints: print(f"  {key}: {len(value)+1}")
     
@@ -142,7 +143,7 @@ class Scorecard():
             self.thresholds[col] = col_thresholds.tolist()
         
         if self.show_prints: print("\nthresholds ", self.thresholds)
-        if self.show_prints: print("num of bins: ")
+        print("num of bins: ")
         for key, value in self.thresholds.items():
             if self.show_prints: print(f"  {key}: {len(value)+1}")
 
@@ -256,18 +257,7 @@ class Scorecard():
         MSEs = [] # mean squared error
         accuracies = [] 
         AUCs = [] # area under the ROC curve
-        
-        '''if self.use_sbc:
-            self.model.fit(self.X, np.ravel(self.y)) 
-            y_pred_sbc = self.model.predict(self.X)
-            y_pred = self.sbc.classif(y_pred_sbc)
-            y_pred.index = self.og_y.index
-            
-            accuracies.append((y_pred == self.og_y).mean())
-            print("accuracy: ", accuracies)
-            return np.mean(accuracies)
-        
-        else:'''
+ 
         for train_index, test_index in kf.split(self.X, self.y):
             X_train, X_test = self.X.iloc[train_index], self.X.iloc[test_index]
             y_train, y_test = self.y.iloc[train_index], self.y.iloc[test_index]
@@ -282,11 +272,12 @@ class Scorecard():
             else:
                 AUCs.append(roc_auc_score(y_test, y_pred))
             
-        print("MSEs: ", MSEs)
-        print("accuracies: ", accuracies)
-        print("AUCs: ", AUCs)
+        if self.show_prints: print("MSEs: ", MSEs)
+        if self.show_prints: print("accuracies: ", accuracies)
+        if self.show_prints: print("AUCs: ", AUCs)
     
-        print("mean MSE: ", np.mean(MSEs))
+        if self.show_prints: print("mean MSE: ", np.mean(MSEs))
         print("mean accuracy: ", np.mean(accuracies))
-        print("mean AUC: ", np.mean(AUCs))
+        if self.show_prints: print("mean AUC: ", np.mean(AUCs))
         return np.mean(MSEs), np.mean(accuracies), np.mean(AUCs)
+ 
