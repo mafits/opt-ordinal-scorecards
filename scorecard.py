@@ -80,6 +80,9 @@ class Scorecard():
             plt.title('ML weights')
             plt.show()
         
+        # put weights to 0 if their absolute value is less than 0.0001
+        self.weights['Weight'] = np.where(abs(self.weights['Weight']) < 0.0001, 0, self.weights['Weight'])
+        
         # get nonzero weights
         self.nonzero_weights = self.weights[self.weights['Weight'] != 0]
         if self.nonzero_weights.shape[0] < self.weights.shape[0]:
@@ -252,7 +255,7 @@ class Scorecard():
         self.weights = self.get_weights()
         
 
-    def cross_val_score(self, n_splits=10):                   
+    def cross_val_score(self, n_splits=10):           
         kf = StratifiedKFold(n_splits=n_splits)
         MSEs = [] # mean squared error
         accuracies = [] 
@@ -271,6 +274,8 @@ class Scorecard():
                 AUCs.append(roc_auc_score(y_test, self.model.predict_proba(X_test)[:, 1]))
             else:
                 AUCs.append(roc_auc_score(y_test, y_pred))
+            
+            
             
         if self.show_prints: print("MSEs: ", MSEs)
         if self.show_prints: print("accuracies: ", accuracies)
