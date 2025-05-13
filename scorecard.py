@@ -69,7 +69,7 @@ class Scorecard():
         print('\nmodel')
         if model_method == "RSS": self.rss()
         elif model_method == "ML": self.max_likelihood()
-        elif model_method == "MARGIN_MAX": self.margin_max()
+        elif model_method == "MM": self.margin_max()
         
         # show weights
         if show_prints: 
@@ -80,7 +80,7 @@ class Scorecard():
             plt.title('ML weights')
             plt.show()
         
-        # put weights to 0 if their absolute value is less than 0.0001
+        # THRESHOLD !! put weights to 0 if their absolute value is less than 0.0001
         self.weights['Weight'] = np.where(abs(self.weights['Weight']) < 0.0001, 0, self.weights['Weight'])
         
         # get nonzero weights
