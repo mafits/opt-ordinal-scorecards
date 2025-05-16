@@ -38,6 +38,7 @@ class Scorecard():
         self.show_prints = True
         self.use_sbc = False
         self.goal_num_nonzero_weights = None
+        self.categorical = None
 
     
     def fit(self, X, y, thresholds_method, encoding_method, model_method, use_sbc=False, num_nonzero_weights=None, show_prints=True):
@@ -47,6 +48,7 @@ class Scorecard():
         self.show_prints = show_prints
         self.use_sbc = use_sbc
         self.goal_num_nonzero_weights = num_nonzero_weights 
+        self.categorical = X.select_dtypes(include=['object']).columns
         
         # transform from ordinal to binary
         self.og_X = self.X
@@ -105,9 +107,18 @@ class Scorecard():
     # CAIM
     def discretize_caim(self):
         if self.show_prints: print("num of features: ", self.X.shape[1])
-        caim = CAIMD()
+        '''categorical_features = self.X.select_dtypes(include=['object']).columns
+        categorical_features = list(categorical_features)
+        caim = CAIMD(categorical_features=categorical_features)
+        '''
+        # trandge categorical features to array of indices
+        print("categorical features: ", self.categorical)
+        index_categorical = [self.X.columns.get_loc(col) for col in self.categorical]
+        print("index categorical features: ", index_categorical)
+        caim = CAIMD(categorical_features=np.array(index_categorical))
         
-        # remove sbc_column and take care of it later
+        
+        # remove sbc_column (take care of it later)
         X_aux = self.X.copy()
         if self.use_sbc:
             sbc_column = self.X.columns[-1]
@@ -116,14 +127,19 @@ class Scorecard():
             X_aux = X_aux.drop(columns=[sbc_column])
 
         # get thresholds
-        self.thresholds = caim.fit_transform(X_aux, self.y) # fit() and transform()
+        caim_X = caim.fit_transform(X_aux, self.y) # fit() and transform()
         
         # get thresholds from caim.split_scheme (dict with column index : thresholds)
         # transform all values to floats
-        # and keys with column indexes to column names
-        self.thresholds = {X_aux.columns[i]: [float(val) for val in value] for i, (key, value) in enumerate(caim.split_scheme.items())}
+        # and keys with column indexes to column names 
+        index_non_categorical = [i for i in range(X_aux.shape[1]) if i not in index_categorical]
+        self.thresholds = {X_aux.columns[index_non_categorical[i]]: [float(val) for val in values] for i, (key, values) in enumerate(caim.split_scheme.items())}
         
-        # do thresholds for sbc_column = the values of the column
+        # for categorical features, get the unique values and make them the thresholds
+        for i, col in enumerate(self.categorical):
+            self.thresholds[col] = np.unique(self.X[col])
+            
+        # do thresholds for sbc_column (= the values of the column)
         if self.use_sbc:
             self.thresholds[sbc_column] = {float(val) for val in self.X[sbc_column]}
             self.thresholds[sbc_column] = list(self.thresholds[sbc_column])
@@ -133,6 +149,7 @@ class Scorecard():
         print("num of bins: ")
         for i, (key, value) in enumerate(self.thresholds.items()):
             if self.show_prints: print(f"  {key}: {len(value)+1}")
+        
     
     # INFINITESIMAL BINS
     # thresholds are the points in between 2 consecutive values in the sorted list
@@ -166,7 +183,11 @@ class Scorecard():
     def disc_1_out_of_k(self):
         self.X_disc = []
         for col in self.X_columns:
-            bins = self.get_bins(self.thresholds[col], self.X[col]) # gets bin number of each row
+            # if the column is categorical, convert it to numeric
+            if col in self.categorical:
+                bins = pd.factorize(self.X[col])[0] # gets bin number of each row
+            else:
+                bins = self.get_bins(self.thresholds[col], self.X[col]) # gets bin number of each row
             bins_df = pd.get_dummies(bins, prefix=f'feat{col}-bin', prefix_sep='').astype(int) # one hot encoding
             
             # add missing columns
@@ -181,12 +202,19 @@ class Scorecard():
             self.X_disc.append(bins_df)
         
         self.X_disc = pd.concat(self.X_disc, axis=1)
+        # show self.X_disc
+        if self.show_prints: print("X_disc shape: ", self.X_disc.shape)
+        if self.show_prints: print("X_disc columns: ", self.X_disc.columns)
+        if self.show_prints: print("X_disc head: ", self.X_disc.head())
     
     # differential coding
     def disc_diff_coding(self):
         self.X_disc = []
         for col in self.X_columns:
-            bins = self.get_bins(self.thresholds[col], self.X[col]) # gets bin number of each row
+            if col in self.categorical:
+                bins = pd.factorize(self.X[col])[0]
+            else:
+                bins = self.get_bins(self.thresholds[col], self.X[col]) # gets bin number of each row
             num_bins = len(self.thresholds[col]) + 1
             bin_df = pd.DataFrame(0, index=self.X.index, columns=[f'feat{col}-bin{i}' for i in range(1, num_bins)])
             for i in range(1, num_bins):

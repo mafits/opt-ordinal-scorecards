@@ -51,7 +51,7 @@ class CAIMD(BaseEstimator, TransformerMixin):
         """
 
         if isinstance(categorical_features, str): # 'auto' or 'all'
-            self._features = categorical_features
+            self._features = categorical_features 
             self.categorical = None
         elif (isinstance(categorical_features, list)) or (isinstance(categorical_features, np.ndarray)): # array of indices or list of labels
             self._features = None
@@ -78,24 +78,31 @@ class CAIMD(BaseEstimator, TransformerMixin):
         if isinstance(X, pd.DataFrame): # if X is a pandas dataframe
             # self.indx = X.index
             # self.columns = X.columns
-            if isinstance(self._features, list): # if the categorical features is a list of labels
+            if isinstance(self._features, list): 
                 self.categorical = [X.columns.get_loc(label) for label in self._features]  # get the indices of the labels
+            '''
+            if isinstance(self.categorical, list): 
+                self.categorical = [X.columns.get_loc(label) for label in self.categorical]
+            '''
             X = X.values
             y = y.values
         if self._features == 'auto':
             self.categorical = self.check_categorical(X, y) # check which features are categorical 
         categorical = self.categorical
-        print('Categorical', categorical)
+        #print('Categorical', categorical)
 
         min_splits = np.unique(y).shape[0] 
         # minimum number of splits (number of cut off points; number of intervals - 1) 
         # is the number of classes of the target variable
-
+        
+        #print("categorical features: ", categorical)
         for j in range(X.shape[1]): # for each feature
             if j in categorical: # skip if feature categorical
+                #print('Feature categorical ', j)      
                 continue
+            #print('Feature non categorical ', j)
             xj = X[:, j] # get the feature
-            xj = xj[np.invert(np.isnan(xj))] # remove missing values
+            #xj = xj[np.invert(np.isnan(xj))] # remove missing values
             
             new_index = xj.argsort() # indices that would sort the array
             xj = xj[new_index] # sort the feature
@@ -141,7 +148,7 @@ class CAIMD(BaseEstimator, TransformerMixin):
                                               ' Add it to categorical list!')
 
             self.split_scheme[j] = mainscheme
-            print('#', j, ' GLOBAL CAIM ', global_caim)
+            #print('#', j, ' GLOBAL CAIM ', global_caim)
         return self
 
     def transform(self, X):
@@ -223,11 +230,18 @@ class CAIMD(BaseEstimator, TransformerMixin):
     def check_categorical(self, X, y): 
         categorical = [] 
         ny2 = 2 * np.unique(y).shape[0] # 2 * number of classes of the target variable
+        c = X.select_dtypes(include=['object']).columns
         for j in range(X.shape[1]): # for each feature
-            xj = X[:, j] # get the feature
-            xj = xj[np.invert(np.isnan(xj))] 
-            if np.unique(xj).shape[0] < ny2:
+            # if the feature is "object" type, add it to the categorical list
+            if j in c:
                 categorical.append(j)
+                continue
+            xj = X[:, j] # get the feature
+            #xj = xj[np.invert(np.isnan(xj))] 
+            if np.unique(xj).shape[0] < ny2: # if the number of unique values is less than 2 * number of classes of the target variable
+                categorical.append(j) # add the feature to the categorical list
+                
+        # print('Categorical features:', categorical)
         return categorical
 
 
