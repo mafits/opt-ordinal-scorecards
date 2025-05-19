@@ -114,8 +114,7 @@ class Scorecard():
         # trandge categorical features to array of indices
         print("categorical features: ", self.categorical)
         index_categorical = [self.X.columns.get_loc(col) for col in self.categorical]
-        print("index categorical features: ", index_categorical)
-        caim = CAIMD(categorical_features=np.array(index_categorical))
+        caim = CAIMD(list(self.categorical))
         
         
         # remove sbc_column (take care of it later)
@@ -137,7 +136,7 @@ class Scorecard():
         
         # for categorical features, get the unique values and make them the thresholds
         for i, col in enumerate(self.categorical):
-            self.thresholds[col] = np.unique(self.X[col])
+            self.thresholds[col] = np.unique(self.X[col].astype(str))
             
         # do thresholds for sbc_column (= the values of the column)
         if self.use_sbc:
@@ -156,11 +155,13 @@ class Scorecard():
     def discretize_infbins(self):
         self.thresholds = {}
         for col in self.X_columns:
-            # sort unique values
-            sorted_col = np.unique(self.X[col])
-            # get thresholds
-            col_thresholds = (sorted_col[:-1] + sorted_col[1:]) / 2
-            self.thresholds[col] = col_thresholds.tolist()
+            if col in self.categorical:
+                sorted_col = np.unique(self.X[col].astype(str))
+                self.thresholds[col] = sorted_col
+            else:
+                sorted_col = np.unique(self.X[col])
+                col_thresholds = (sorted_col[:-1] + sorted_col[1:]) / 2
+                self.thresholds[col] = col_thresholds.tolist()
         
         if self.show_prints: print("\nthresholds ", self.thresholds)
         print("num of bins: ")
@@ -185,6 +186,7 @@ class Scorecard():
         for col in self.X_columns:
             # if the column is categorical, convert it to numeric
             if col in self.categorical:
+                # !!!!!
                 bins = pd.factorize(self.X[col])[0] # gets bin number of each row
             else:
                 bins = self.get_bins(self.thresholds[col], self.X[col]) # gets bin number of each row
@@ -292,14 +294,25 @@ class Scorecard():
         for train_index, test_index in kf.split(self.X, self.y):
             X_train, X_test = self.X.iloc[train_index], self.X.iloc[test_index]
             y_train, y_test = self.y.iloc[train_index], self.y.iloc[test_index]
-            self.model.fit(X_train, np.ravel(y_train))
-            y_pred = self.model.predict(X_test)
+            
+            # encode categorical features
+            X_train_enc = X_train.copy()
+            X_test_enc = X_test.copy()
+            for col in self.categorical:
+                # fit factorizer on train, apply to both train and test
+                train_bins, uniques = pd.factorize(X_train_enc[col])
+                X_train_enc[col] = train_bins
+                # map test values to train uniques, unseen to -1
+                X_test_enc[col] = pd.Categorical(X_test_enc[col], categories=uniques).codes
+
+            self.model.fit(X_train_enc, np.ravel(y_train))
+            y_pred = self.model.predict(X_test_enc)
             
             MSEs.append(mean_squared_error(y_test, y_pred))
             accuracies.append((np.array(y_pred) == np.array(y_test)).mean())
             #AUCs.append(roc_auc_score(y_test, model.predict_proba(X_test)[:, 1]))
             if hasattr(self.model, "predict_proba"):
-                AUCs.append(roc_auc_score(y_test, self.model.predict_proba(X_test)[:, 1]))
+                AUCs.append(roc_auc_score(y_test, self.model.predict_proba(X_test_enc)[:, 1]))
             else:
                 AUCs.append(roc_auc_score(y_test, y_pred))
             
