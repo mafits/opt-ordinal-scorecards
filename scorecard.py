@@ -1,8 +1,11 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from sklearn.metrics import mean_squared_error, roc_auc_score
+from sklearn.metrics import mean_squared_error, roc_auc_score, accuracy_score
 from sklearn.model_selection import GridSearchCV, StratifiedKFold
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
+
 
 # ordinal to binary 
 from sbc import SBC
@@ -19,6 +22,7 @@ from sklearn.svm import SVC
 from sklearn.linear_model import Ridge
 from sklearn.linear_model import Lasso
 from sklearn.linear_model import ElasticNet
+from sklearn.model_selection import learning_curve
 
 
 
@@ -41,14 +45,14 @@ class Scorecard():
         self.categorical = None
 
     
-    def fit(self, X, y, thresholds_method, encoding_method, model_method, use_sbc=False, num_nonzero_weights=None, show_prints=True):
+    def fit(self, X, y, categorical_columns, thresholds_method, encoding_method, model_method, use_sbc=False, num_nonzero_weights=None, show_prints=True):
         self.X = X
         self.X_columns = X.columns
         self.y = y
         self.show_prints = show_prints
         self.use_sbc = use_sbc
         self.goal_num_nonzero_weights = num_nonzero_weights 
-        self.categorical = X.select_dtypes(include=['object']).columns
+        self.categorical = categorical_columns
         
         # transform from ordinal to binary
         self.og_X = self.X
@@ -81,9 +85,6 @@ class Scorecard():
             plt.xticks(rotation=90)
             plt.title('ML weights')
             plt.show()
-        
-        # THRESHOLD !! put weights to 0 if their absolute value is less than 0.0001
-        self.weights['Weight'] = np.where(abs(self.weights['Weight']) < 0.0001, 0, self.weights['Weight'])
         
         # get nonzero weights
         self.nonzero_weights = self.weights[self.weights['Weight'] != 0]
@@ -285,7 +286,7 @@ class Scorecard():
         self.weights = self.get_weights()
         
 
-    def cross_val_score(self, n_splits=10):           
+    def cross_val_score(self, n_splits=10):   
         kf = StratifiedKFold(n_splits=n_splits)
         MSEs = [] # mean squared error
         accuracies = [] 
@@ -294,25 +295,15 @@ class Scorecard():
         for train_index, test_index in kf.split(self.X, self.y):
             X_train, X_test = self.X.iloc[train_index], self.X.iloc[test_index]
             y_train, y_test = self.y.iloc[train_index], self.y.iloc[test_index]
-            
-            # encode categorical features
-            X_train_enc = X_train.copy()
-            X_test_enc = X_test.copy()
-            for col in self.categorical:
-                # fit factorizer on train, apply to both train and test
-                train_bins, uniques = pd.factorize(X_train_enc[col])
-                X_train_enc[col] = train_bins
-                # map test values to train uniques, unseen to -1
-                X_test_enc[col] = pd.Categorical(X_test_enc[col], categories=uniques).codes
 
-            self.model.fit(X_train_enc, np.ravel(y_train))
-            y_pred = self.model.predict(X_test_enc)
+            self.model.fit(X_train, np.ravel(y_train))
+            y_pred = self.model.predict(X_test)
             
             MSEs.append(mean_squared_error(y_test, y_pred))
-            accuracies.append((np.array(y_pred) == np.array(y_test)).mean())
+            accuracies.append(accuracy_score(y_test, y_pred))
             #AUCs.append(roc_auc_score(y_test, model.predict_proba(X_test)[:, 1]))
             if hasattr(self.model, "predict_proba"):
-                AUCs.append(roc_auc_score(y_test, self.model.predict_proba(X_test_enc)[:, 1]))
+                AUCs.append(roc_auc_score(y_test, self.model.predict_proba(X_test)[:, 1]))
             else:
                 AUCs.append(roc_auc_score(y_test, y_pred))
             
@@ -326,4 +317,68 @@ class Scorecard():
         print("mean accuracy: ", np.mean(accuracies))
         if self.show_prints: print("mean AUC: ", np.mean(AUCs))
         return np.mean(MSEs), np.mean(accuracies), np.mean(AUCs)
- 
+    
+    
+    def plot_learning_curve(self, scoring='accuracy', cv=10):
+
+        train_sizes, train_scores, test_scores = learning_curve(
+            self.model, self.X_disc, np.ravel(self.y), cv=cv, scoring=scoring,
+            train_sizes=np.linspace(0.1, 1.0, 10), shuffle=True, random_state=42
+        )
+        train_scores_mean = np.mean(train_scores, axis=1)
+        test_scores_mean = np.mean(test_scores, axis=1)
+
+        plt.figure()
+        plt.plot(train_sizes, train_scores_mean, 'o-', color='r', label='Training score')
+        plt.plot(train_sizes, test_scores_mean, 'o-', color='g', label='Cross-validation score')
+        plt.title('Learning Curve')
+        plt.xlabel('Training examples')
+        plt.ylabel(scoring.capitalize())
+        plt.legend(loc='best')
+        plt.grid()
+        plt.show()
+    
+
+
+    def plot_accuracy_vs_sparsity(self, thresholds=[0.1, 0.01, 0.001, 0.0001, 0]):
+        accuracies = []
+        sparsities = []
+        
+        # get array of weights from self.weights 
+        weights = self.weights['Weight'].values.flatten()
+
+        for threshold in thresholds:
+            # put weights to 0 if abs(weight) < threshold
+            selected_weights = np.where(np.abs(weights) >= threshold, weights, 0)
+            sparsity = int(np.sum(selected_weights != 0)) # number of non-zero weights
+            
+
+            # calculate y_pred using scorecard.model with selected weights
+            selected_weights_series = pd.Series(selected_weights, index=self.X_disc.columns)
+            logits = self.X_disc.values @ selected_weights_series
+            probs = 1 / (1 + np.exp(-logits))
+            y_pred = (probs >= 0.5).astype(int)
+            
+            # calculate accuracy           
+            accuracy = accuracy_score(self.y, y_pred)
+            accuracies.append(accuracy)
+            sparsities.append(sparsity)
+            if self.show_prints: print(f"threshold: {threshold}, accuracy: {accuracy}, sparsity: {sparsity}")
+
+        plt.figure(figsize=(8, 5))
+        plt.scatter(sparsities, accuracies, color='red')
+        cmap = cm.get_cmap('viridis', len(thresholds))
+        colors = [cmap(i) for i in range(len(thresholds))]
+        for i, (x, y) in enumerate(zip(sparsities, accuracies)):
+            plt.scatter(x, y, color=colors[i], label=f'{thresholds[i]}')
+            plt.text(x, y, f'{thresholds[i]}', fontsize=9, ha='right', va='bottom', color=colors[i])
+        # Create a legend mapping colors to thresholds
+        handles = [plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=colors[i], label=f'{thresholds[i]}', markersize=8) for i in range(len(thresholds))]
+        plt.legend(handles=handles, title='Thresholds', bbox_to_anchor=(1.05, 1), loc='upper left')
+        plt.xlabel('sparsity (number of non-zero weights)')
+        plt.ylabel('accuracy')
+        plt.title('accuracy vs sparsity')
+        plt.show()
+
+        
+    
