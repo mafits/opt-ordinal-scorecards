@@ -48,11 +48,14 @@ class Scorecard():
         self.test_y = None
         self.train_X = None
         self.train_y = None
+        self.train_X_columns = None
         self.accuracy = None
         self.encoding_method = None
+        
+        self.test_X_disc = None
 
     
-    def fit(self, X, y, categorical_columns, thresholds_method, encoding_method, model_method, use_sbc=False, num_nonzero_weights=None, show_prints=True):
+    def fit(self, X, y, categorical_columns, thresholds_method, encoding_method, model_method, use_sbc=False, mapping=None, num_nonzero_weights=None, show_prints=True):
         self.X = X
         self.X_columns = X.columns
         self.y = y
@@ -62,15 +65,22 @@ class Scorecard():
         self.categorical = categorical_columns
         self.encoding_method = encoding_method
         
-        # transform from ordinal to binary
-        self.og_X = self.X
-        self.og_y = self.y
-        if use_sbc:
-            print("SBC reduction")
-            self.X, self.y, self.X_columns, _ = self.sbc.reduction(self.X, self.y, h=1)
-        
         # get train and test data (75% train, 25% test)
         self.train_X, self.test_X, self.train_y, self.test_y = train_test_split(self.X, self.y, test_size=0.25, random_state=42)
+        self.train_X_columns = self.train_X.columns
+        
+        # transform from ordinal to binary
+        self.train_X_og = self.train_X
+        self.train_y_og = self.train_y
+        self.test_X_og = self.test_X
+        self.test_y_og = self.test_y
+        
+        if use_sbc:
+            print("SBC reduction of train set")
+            self.train_X, self.train_y, self.train_X_columns, train_data = self.sbc.reduction(self.train_X, self.train_y, mapping)
+            print("\nSBC reduction of test set")
+            self.test_X, self.test_y, test_X_columns, test_data = self.sbc.reduction(self.test_X, self.test_y, mapping)
+        
         
         # discretization thresholds
         print('\ndiscretization thresholds')
@@ -118,22 +128,22 @@ class Scorecard():
     # discretization thresholds
     # CAIM
     def discretize_caim(self):
-        if self.show_prints: print("num of features: ", self.X.shape[1])
-        print("categorical features: ", self.categorical)
-        index_categorical = [self.X.columns.get_loc(col) for col in self.categorical]
+        if self.show_prints: print("num of features: ", self.train_X.shape[1])
+        if self.show_prints: print("categorical features: ", self.categorical)
+        index_categorical = [self.train_X_columns.get_loc(col) for col in self.categorical]
+        if self.show_prints: print("index_categorical: ", index_categorical)
         caim = CAIMD(list(self.categorical))
         
-        
-        # remove sbc_column (take care of it later)
+        # remove sbc_column
         X_aux = self.train_X.copy()
         if self.use_sbc:
-            sbc_column = self.X.columns[-1]
+            sbc_column = self.train_X_columns[-1]
             if self.show_prints: print("sbc_column: ", sbc_column)
             # remove sbc_column from X_aux
             X_aux = X_aux.drop(columns=[sbc_column])
 
         # get thresholds
-        caim_X = caim.fit_transform(X_aux, self.y) # fit() and transform()
+        caim.fit_transform(X_aux, self.train_y) # fit() and transform()
         
         # get thresholds from caim.split_scheme (dict with column index : thresholds)
         # transform all values to floats
@@ -141,7 +151,9 @@ class Scorecard():
         index_non_categorical = [i for i in range(X_aux.shape[1]) if i not in index_categorical]
         self.thresholds = {X_aux.columns[index_non_categorical[i]]: [float(val) for val in values] for i, (key, values) in enumerate(caim.split_scheme.items())}
         
-        # for categorical features, get the unique values and make them the thresholds
+        # for categorical features
+        # sort the unique values and make thresholds be the values in between each pair of consecutive values
+        
         for i, col in enumerate(self.categorical):
             self.thresholds[col] = np.unique(self.train_X[col].astype(str))
             
@@ -161,10 +173,9 @@ class Scorecard():
     # thresholds are the points in between 2 consecutive values in the sorted list
     def discretize_infbins(self):
         self.thresholds = {}
-        for col in self.X_columns:
+        for col in self.train_X.columns:
             if col in self.categorical:
-                sorted_col = np.unique(self.train_X[col].astype(str))
-                self.thresholds[col] = sorted_col
+                self.thresholds[col] = np.unique(self.train_X[col].astype(str))
             else:
                 sorted_col = np.unique(self.train_X[col])
                 col_thresholds = (sorted_col[:-1] + sorted_col[1:]) / 2
@@ -190,22 +201,24 @@ class Scorecard():
     # 1 out of k
     def disc_1_out_of_k(self, X_to_encode):
         X_disc = []
+        # for each column in X_to_encode, create a one-hot encoding of the bins
         for col in X_to_encode.columns:
-            # if the column is categorical, convert it to numeric
-            if col in self.categorical:
-                # !!!!!
-                bins = pd.factorize(X_to_encode[col])[0] # gets bin number of each row
-            else:
-                bins = self.get_bins(self.thresholds[col], X_to_encode[col]) # gets bin number of each row
-            bins_df = pd.get_dummies(bins, prefix=f'feat{col}-bin', prefix_sep='').astype(int) # one hot encoding
+            bin = np.digitize(X_to_encode[col], self.thresholds[col]) # gets bin number of each row
+            bins_df = pd.get_dummies(bin, prefix=f'feat{col}-bin', prefix_sep='').astype(int) # one hot encoding
             
-            # add missing columns
+            # add missing columns (if some bins are not present in the data)
+            missing_cols = []
             for i in range(1, len(self.thresholds[col]) + 1):
-                if f'feat{col}-bin{i}' not in bins_df.columns:
-                    bins_df[f'feat{col}-bin{i}'] = 0
+                col_name = f'feat{col}-bin{i}'
+                if col_name not in bins_df.columns:
+                    missing_cols.append(pd.Series(0, index=bins_df.index, name=col_name))
+            if missing_cols:
+                bins_df = pd.concat([bins_df] + missing_cols, axis=1)
             
             # remove first column (bin0)
             bins_df = bins_df.drop(columns=f'feat{col}-bin0', errors='ignore')
+            
+            bins_df = bins_df.reindex(sorted(bins_df.columns), axis=1)
             
             # add bins of the column to the list
             X_disc.append(bins_df)
@@ -222,10 +235,7 @@ class Scorecard():
     def disc_diff_coding(self, X_to_encode):
         X_disc = []
         for col in X_to_encode.columns:
-            if col in self.categorical:
-                bins = pd.factorize(X_to_encode[col])[0]
-            else:
-                bins = self.get_bins(self.thresholds[col], X_to_encode[col]) # gets bin number of each row
+            bins = self.get_bins(self.thresholds[col], X_to_encode[col]) # gets bin number of each row
             num_bins = len(self.thresholds[col]) + 1
             bin_df = pd.DataFrame(0, index=X_to_encode.index, columns=[f'feat{col}-bin{i}' for i in range(1, num_bins)])
             for i in range(1, num_bins):
@@ -271,7 +281,7 @@ class Scorecard():
     
     # maximum likelihood (GLM with binomial response and logit link function)
     def max_likelihood(self):
-        logistic = LogisticRegression(solver = 'liblinear', penalty = 'l1')
+        logistic = LogisticRegression(solver = 'liblinear', penalty = 'l1', max_iter=10000)
         alpha_values = [0.001, 0.01, 0.1, 0.4, 0.6, 0.9, 1.0]
         param_grid = {'C': [1/a for a in alpha_values]} # inverse of regularization strength
         grid_search_logistic = self.grid_search(logistic, param_grid)
@@ -296,19 +306,30 @@ class Scorecard():
         self.weights = self.get_weights()
     
     def evaluate(self):
-        # get encoded version of test set
-        if self.encoding_method == "1_OUT_OF_K": test_X_disc = self.disc_1_out_of_k(self.test_X)
-        elif self.encoding_method == "DIFF_CODING": test_X_disc = self.disc_diff_coding(self.test_X)
+        if self.show_prints: print("\nevaluate")
+        # get encoded version of test sett
+        if self.show_prints: print("encoding test set")
+        if self.encoding_method == "1_OUT_OF_K": self.test_X_disc = self.disc_1_out_of_k(self.test_X)
+        elif self.encoding_method == "DIFF_CODING": self.test_X_disc = self.disc_diff_coding(self.test_X)
         
         # evaluate the model on the test set
-        y_pred = self.model.predict(test_X_disc)
-        y_pred_proba = self.model.predict_proba(test_X_disc)[:, 1]
+        y_pred = self.model.predict(self.test_X_disc)
+        y_pred_proba = self.model.predict_proba(self.test_X_disc)[:, 1]
         
         # calculate metrics
         mse = mean_squared_error(self.test_y, y_pred)
         accuracy = accuracy_score(self.test_y, y_pred)
         auc = roc_auc_score(self.test_y, y_pred_proba)
         
+        # show predictions vs true values
+        if self.use_sbc:
+            y_pred = self.sbc.classif(y_pred)
+        if self.show_prints:
+            results_df = pd.DataFrame({'Predictions': y_pred, 'True values': self.test_y_og})
+            print(results_df.head(10))
+            
+        
+        # show metrics
         print("MSE: ", mse)
         print("Accuracy: ", accuracy)
         print("AUC: ", auc)
@@ -368,8 +389,7 @@ class Scorecard():
         plt.show()
     
 
-
-    def plot_accuracy_vs_sparsity(self, caim_accuracy, caim_num_zero_weights, thresholds=[0.1, 0.01, 0.001, 0.0001, 0]):
+    def plot_accuracy_vs_sparsity(self, caim_accuracy, caim_num_zero_weights, infbins_accuracy, infbins_num_zero_weights, thresholds=[0.1, 0.01, 0.001, 0.0001, 0]):
         accuracies = []
         sparsities = []
         
@@ -385,16 +405,17 @@ class Scorecard():
             
 
             # calculate y_pred using scorecard.model with selected weights
-            selected_weights_series = pd.Series(selected_weights, index=self.X_disc.columns)
-            logits = self.X_disc.values @ selected_weights_series
+            selected_weights_series = pd.Series(selected_weights, index=self.test_X_disc.columns)
+            logits = self.test_X_disc.values @ selected_weights_series
             probs = 1 / (1 + np.exp(-logits))
             y_pred = (probs >= 0.5).astype(int)
             
             # calculate accuracy           
-            accuracy = accuracy_score(self.y, y_pred)
+            accuracy = accuracy_score(self.test_y, y_pred)
             accuracies.append(accuracy)
             sparsities.append(sparsity)
             if self.show_prints: print(f"threshold: {threshold}, accuracy: {accuracy}, sparsity: {sparsity}")
+        if self.show_prints: print(f"infbins, accuracy: {infbins_accuracy}, sparsity: {infbins_num_zero_weights}")
 
         # plot
         plt.figure(figsize=(8, 5))
@@ -407,8 +428,12 @@ class Scorecard():
         # CAIM point
         plt.scatter(caim_num_zero_weights, caim_accuracy, color='blue', marker='*', s=150, label='CAIM')
         plt.text(caim_num_zero_weights, caim_accuracy, 'CAIM', fontsize=10, ha='left', va='bottom', color='blue')
+        # inf bins threshold=0 point
+        plt.scatter(infbins_num_zero_weights, infbins_accuracy, color='green', marker='o', s=60, label='0')
+        plt.text(infbins_num_zero_weights, infbins_accuracy, 'infbins', fontsize=10, ha='left', va='bottom', color='green')
         handles = [plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=colors[i], label=f'{thresholds[i]}', markersize=8) for i in range(len(thresholds))]
         handles.append(plt.Line2D([0], [0], marker='*', color='w', markerfacecolor='blue', label='CAIM', markersize=12))
+        handles.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='green', label='infbins', markersize=8))
         plt.legend(handles=handles, title='Thresholds', bbox_to_anchor=(1.05, 1), loc='upper left')
         plt.xlabel('sparsity (number of non-zero weights)')
         plt.ylabel('accuracy')

@@ -9,7 +9,7 @@ class SBC():
         self.mapping = None
     
     
-    def reduction(self, X, y, h=1):
+    def reduction(self, X, y, mapping=None, h=1):
         # num of classes
         self.K = len(np.unique(y))
         print("number of features: ", X.shape[1])
@@ -21,12 +21,16 @@ class SBC():
         
         # if class labels not integer, convert to integer
         if not np.issubdtype(y.dtype, np.integer):
-            new_y = pd.Series(pd.factorize(y)[0])
-            # show the mapping
-            self.mapping = pd.Series(pd.factorize(y)[1], index=np.unique(new_y))
-            self.mapping = self.mapping.reset_index(drop=True).drop_duplicates()
-            print("mapping: ", self.mapping)
-            y = new_y
+            if mapping is None:
+                new_y = pd.Series(pd.factorize(y)[0])
+                # show the mapping
+                self.mapping = dict(enumerate(pd.factorize(y)[1]))
+                print("mapping: ", self.mapping)
+                y = new_y
+            else:
+                # apply mapping dictionary to y
+                y = pd.Series(y.map(lambda v: {v_:k_ for k_, v_ in mapping.items()}[v]))
+                self.mapping = mapping
         
         # for each point, create s replicas each with a new feature in [0, h, h*2, ... h*(s-1)]
         # the new label is a binary label
@@ -34,7 +38,7 @@ class SBC():
         new_y = []
         for i in range(X.shape[0]): # for each point
             for j in range(self.s): # for each replica
-                new_X.append(np.append(X.iloc[i].values, h*j))
+                new_X.append(np.append(X.iloc[i].values, h*j)) 
                 new_label = y.iloc[i] <= j
                 new_y.append(new_label.astype(int))
         
@@ -42,7 +46,7 @@ class SBC():
         new_y = pd.DataFrame(new_y).reset_index(drop=True)
         new_data = pd.concat([new_X, new_y], axis=1)
         # rename binary label column
-        new_data.columns = list(new_X.columns) + ['(binary_label)']
+        new_data.columns = list(new_X.columns) + ['binary_label']
         
         print("new num features: ", new_X.shape[1])
         print("new num target classes: ", len(np.unique(new_y)))
@@ -73,7 +77,6 @@ class SBC():
         
         # transform back to original labels using the mapping
         if self.mapping is not None:
-            final_labels = self.mapping.iloc[final_labels].values
-            final_labels = pd.Series(final_labels, index=np.arange(len(final_labels)))
+            final_labels = pd.Series(final_labels).map(self.mapping).values
         
         return final_labels
