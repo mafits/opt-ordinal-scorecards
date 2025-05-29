@@ -29,12 +29,26 @@ from sklearn.model_selection import learning_curve
 
 class Scorecard():
     def __init__(self):
+        # data
         self.X = None
         self.X_columns = None
-        self.X_disc = []
         self.y = None
-        self.og_X = None
-        self.og_y = None
+        
+        # train and test data
+        self.test_X = None
+        self.test_y = None
+        self.train_X = None
+        self.train_y = None
+        
+        # original data (before SBC, discretization and encoding)
+        self.test_y_og = None
+        self.train_X_og = None
+        self.train_y_og = None
+        self.test_X_og = None
+        
+        # discretized and encoded data
+        self.X_disc = []
+        
         self.thresholds = None
         self.sbc = SBC()
         self.model = None
@@ -44,15 +58,12 @@ class Scorecard():
         self.use_sbc = False
         self.goal_num_nonzero_weights = None
         self.categorical = None
-        self.test_X = None
-        self.test_y = None
-        self.train_X = None
-        self.train_y = None
-        self.train_X_columns = None
         self.accuracy = None
         self.encoding_method = None
         
         self.test_X_disc = None
+        
+        
 
     
     def fit(self, X, y, categorical_columns, thresholds_method, encoding_method, model_method, use_sbc=False, mapping=None, num_nonzero_weights=None, show_prints=True):
@@ -67,19 +78,18 @@ class Scorecard():
         
         # get train and test data (75% train, 25% test)
         self.train_X, self.test_X, self.train_y, self.test_y = train_test_split(self.X, self.y, test_size=0.25, random_state=42)
-        self.train_X_columns = self.train_X.columns
         
         # transform from ordinal to binary
-        self.train_X_og = self.train_X
-        self.train_y_og = self.train_y
-        self.test_X_og = self.test_X
-        self.test_y_og = self.test_y
+        self.train_X_og = self.train_X.copy()
+        self.train_y_og = self.train_y.copy()
+        self.test_X_og = self.test_X.copy()
+        self.test_y_og = self.test_y.copy()
         
         if use_sbc:
             print("SBC reduction of train set")
-            self.train_X, self.train_y, self.train_X_columns, train_data = self.sbc.reduction(self.train_X, self.train_y, mapping)
+            self.train_X, self.train_y = self.sbc.reduction(self.train_X, self.train_y, mapping)
             print("\nSBC reduction of test set")
-            self.test_X, self.test_y, test_X_columns, test_data = self.sbc.reduction(self.test_X, self.test_y, mapping)
+            self.test_X, self.test_y = self.sbc.reduction(self.test_X, self.test_y, mapping)
         
         
         # discretization thresholds
@@ -128,17 +138,13 @@ class Scorecard():
     # discretization thresholds
     # CAIM
     def discretize_caim(self):
-        if self.show_prints: print("num of features: ", self.train_X.shape[1])
-        if self.show_prints: print("categorical features: ", self.categorical)
-        index_categorical = [self.train_X_columns.get_loc(col) for col in self.categorical]
-        if self.show_prints: print("index_categorical: ", index_categorical)
+        index_categorical = [self.train_X.columns.get_loc(col) for col in self.categorical]
         caim = CAIMD(list(self.categorical))
         
         # remove sbc_column
         X_aux = self.train_X.copy()
         if self.use_sbc:
-            sbc_column = self.train_X_columns[-1]
-            if self.show_prints: print("sbc_column: ", sbc_column)
+            sbc_column = self.train_X.columns[-1]
             # remove sbc_column from X_aux
             X_aux = X_aux.drop(columns=[sbc_column])
 
@@ -156,6 +162,7 @@ class Scorecard():
         
         for i, col in enumerate(self.categorical):
             self.thresholds[col] = np.unique(self.train_X[col].astype(str))
+            self.thresholds[col] = list(self.thresholds[col])
             
         # do thresholds for sbc_column (= the values of the column)
         if self.use_sbc:
@@ -163,11 +170,17 @@ class Scorecard():
             self.thresholds[sbc_column] = list(self.thresholds[sbc_column])
         
         # print thresholds
-        if self.show_prints: print("\nthresholds ", self.thresholds)
-        print("num of bins: ")
-        for i, (key, value) in enumerate(self.thresholds.items()):
-            if self.show_prints: print(f"  {key}: {len(value)+1}")
-        
+        if self.show_prints: 
+            print("\nthresholds ", self.thresholds)
+            print("num of bins: ")
+            for i, (key, value) in enumerate(self.thresholds.items()):
+                if i in index_categorical:
+                    print(f"  {key}: {len(value)}")
+                else:
+                    # +1 because the number of bins is the number of thresholds + 1
+                    # e.g. if thresholds are [2, 4, 6], then there are 4 bins: (-inf, 2), [2, 4), [4, 6), [6, inf)
+                    print(f"  {key}: {len(value)+1}")
+            
     
     # INFINITESIMAL BINS
     # thresholds are the points in between 2 consecutive values in the sorted list
@@ -176,15 +189,21 @@ class Scorecard():
         for col in self.train_X.columns:
             if col in self.categorical:
                 self.thresholds[col] = np.unique(self.train_X[col].astype(str))
+                self.thresholds[col] = list(self.thresholds[col])
             else:
                 sorted_col = np.unique(self.train_X[col])
+                sorted_col = sorted_col.astype(float)  # ensure the values are floats
                 col_thresholds = (sorted_col[:-1] + sorted_col[1:]) / 2
                 self.thresholds[col] = col_thresholds.tolist()
         
-        if self.show_prints: print("\nthresholds ", self.thresholds)
-        print("num of bins: ")
-        for key, value in self.thresholds.items():
-            if self.show_prints: print(f"  {key}: {len(value)+1}")
+        if self.show_prints: 
+            print("\nthresholds ", self.thresholds)
+            print("num of bins: ")
+            for key, value in self.thresholds.items():
+                if key in self.categorical:
+                    print(f"  {key}: {len(value)}")
+                else:
+                    print(f"  {key}: {len(value)+1}")
 
         return self.thresholds
     
@@ -291,7 +310,6 @@ class Scorecard():
         if self.show_prints: print("ML best alpha: ", best_alpha)
         self.model = grid_search_logistic.best_estimator_
         self.get_weights()
-
     
     # margin maximization (linear SVM)
     def margin_max(self):
@@ -304,7 +322,9 @@ class Scorecard():
         grid_search_svm = self.grid_search(svm,  param_grid)
         self.model = grid_search_svm.best_estimator_
         self.weights = self.get_weights()
-    
+
+
+    # evaluate the model on the test set
     def evaluate(self):
         if self.show_prints: print("\nevaluate")
         # get encoded version of test sett
@@ -314,27 +334,29 @@ class Scorecard():
         
         # evaluate the model on the test set
         y_pred = self.model.predict(self.test_X_disc)
-        y_pred_proba = self.model.predict_proba(self.test_X_disc)[:, 1]
-        
-        # calculate metrics
-        mse = mean_squared_error(self.test_y, y_pred)
-        accuracy = accuracy_score(self.test_y, y_pred)
-        auc = roc_auc_score(self.test_y, y_pred_proba)
+        #y_pred_proba = self.model.predict_proba(self.test_X_disc)[:, 1]
         
         # show predictions vs true values
         if self.use_sbc:
-            y_pred = self.sbc.classif(y_pred)
-        if self.show_prints:
-            results_df = pd.DataFrame({'Predictions': y_pred, 'True values': self.test_y_og})
+            y_pred = self.sbc.classif(y_pred, do_mapping=False)
+            if(self.sbc.mapping is not None):
+                self.test_y_og = self.sbc.apply_mapping(pd.Series(self.test_y_og))
+        if self.show_prints:            
+            results_df = pd.DataFrame({'predictions': y_pred, 'true values': self.test_y_og})
             print(results_df.head(10))
             
         
-        # show metrics
-        print("MSE: ", mse)
-        print("Accuracy: ", accuracy)
-        print("AUC: ", auc)
         
-        return mse, accuracy, auc
+        # calculate and show metrics
+        mse = mean_squared_error(self.test_y_og, y_pred)
+        accuracy = accuracy_score(self.test_y_og, y_pred)
+        #auc = roc_auc_score(self.test_y_og, y_pred_proba)
+        
+        print("mse: ", mse)
+        print("accuracy: ", accuracy)
+        #print("auc: ", auc)
+                
+        return mse, accuracy#, auc
 
     def cross_val_score(self, n_splits=10):   
         kf = StratifiedKFold(n_splits=n_splits)
@@ -367,8 +389,7 @@ class Scorecard():
         print("mean accuracy: ", np.mean(accuracies))
         if self.show_prints: print("mean AUC: ", np.mean(AUCs))
         return np.mean(MSEs), np.mean(accuracies), np.mean(AUCs)
-    
-    
+
     def plot_learning_curve(self, scoring='accuracy', cv=10):
 
         train_sizes, train_scores, test_scores = learning_curve(
@@ -387,7 +408,6 @@ class Scorecard():
         plt.legend(loc='best')
         plt.grid()
         plt.show()
-    
 
     def plot_accuracy_vs_sparsity(self, caim_accuracy, caim_num_zero_weights, infbins_accuracy, infbins_num_zero_weights, thresholds=[0.1, 0.01, 0.001, 0.0001, 0]):
         accuracies = []
@@ -399,7 +419,7 @@ class Scorecard():
         if self.show_prints: print(f"CAIM, accuracy: {caim_accuracy}, sparsity: {caim_num_zero_weights}")
         
         for threshold in thresholds:
-            # put weights to 0 if abs(weight) < threshold
+            # put weights to 0 if its value (in absolute) is less then the threshold
             selected_weights = np.where(np.abs(weights) >= threshold, weights, 0)
             sparsity = int(np.sum(selected_weights != 0)) # number of non-zero weights
             

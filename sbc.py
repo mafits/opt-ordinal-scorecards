@@ -12,6 +12,8 @@ class SBC():
     def reduction(self, X, y, mapping=None, h=1):
         # num of classes
         self.K = len(np.unique(y))
+        
+        # print some information about the original data
         print("number of features: ", X.shape[1])
         print("original num target classes: ", self.K)
         print("original num observations: ", X.shape[0])
@@ -29,6 +31,7 @@ class SBC():
                 y = new_y
             else:
                 # apply mapping dictionary to y
+                print("using provided mapping: ", mapping)
                 y = pd.Series(y.map(lambda v: {v_:k_ for k_, v_ in mapping.items()}[v]))
                 self.mapping = mapping
         
@@ -39,7 +42,7 @@ class SBC():
         for i in range(X.shape[0]): # for each point
             for j in range(self.s): # for each replica
                 new_X.append(np.append(X.iloc[i].values, h*j)) 
-                new_label = y.iloc[i] <= j
+                new_label = y.iloc[i] > j
                 new_y.append(new_label.astype(int))
         
         new_X = pd.DataFrame(new_X).reset_index(drop=True)
@@ -48,6 +51,7 @@ class SBC():
         # rename binary label column
         new_data.columns = list(new_X.columns) + ['binary_label']
         
+        # print some information about the new data
         print("new num features: ", new_X.shape[1])
         print("new num target classes: ", len(np.unique(new_y)))
         print("new num observations: ", new_X.shape[0], " (original num observations *", self.s, ")")
@@ -55,15 +59,13 @@ class SBC():
         print(new_data.head())
         new_X_columns = new_X.columns
         
-        return new_X, new_y, new_X_columns, new_data
+        return new_X, new_y
     
     
     
-    def classif(self, pred_sbc_y, final_index=None):
+    def classif(self, pred_sbc_y, do_mapping=True):
         # get classification of all replicas of each point
         all_labels = [pred_sbc_y[i:i + self.s] for i in range(0, len(pred_sbc_y), self.s)]
-        if final_index is not None:
-            all_labels = [all_labels[i] for i in final_index]
         all_labels = np.array(all_labels)
         print(all_labels)
         
@@ -73,10 +75,20 @@ class SBC():
         # if two are 1 and the rest are 0, then the class is 2
         # ...
         # if all replicas are 1, then the class is K
-        final_labels = np.argmax(all_labels, axis=1)    
+        final_labels = np.sum(all_labels, axis=1)
+        print("predicted labels (before mapping): ", final_labels)
         
         # transform back to original labels using the mapping
-        if self.mapping is not None:
+        if do_mapping == True and self.mapping is not None:
+            print("mapping: ", self.mapping)
             final_labels = pd.Series(final_labels).map(self.mapping).values
+            print("predicted labels (after mapping): ", final_labels)
         
         return final_labels
+    
+    
+    def apply_mapping(self, y):
+        if (y.dtype == 'int'):
+            return pd.Series(y).map(self.mapping)
+        else:
+            return pd.Series(y.map(lambda v: {v_:k_ for k_, v_ in self.mapping.items()}[v]))

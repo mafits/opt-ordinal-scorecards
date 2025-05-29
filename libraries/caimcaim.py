@@ -96,9 +96,7 @@ class CAIMD(BaseEstimator, TransformerMixin):
         
         for j in range(X.shape[1]): # for each feature
             if j in categorical: # skip if feature categorical
-                print('Feature categorical ', j)      
                 continue
-            print('Feature non categorical ', j)
             xj = X[:, j] # get the feature
             #xj = xj[np.invert(np.isnan(xj))] # remove missing values
             
@@ -176,9 +174,9 @@ class CAIMD(BaseEstimator, TransformerMixin):
         for j in range(X.shape[1]):
             if j in categorical:
                 continue
-            sh = scheme[j] # get the cut off points for the feature
+            sh = list(map(int, scheme[j])) # get the cut off points for the feature as integers
             sh[-1] = sh[-1] + 1 # add one to the last cut off point, to ensure that the last interval is inclusive
-            xj = X[:, j] # get the feature
+            xj = X[:, j].astype(int) # get the feature as int
             
             # xi = xi[np.invert(np.isnan(xi))]
             
@@ -189,6 +187,7 @@ class CAIMD(BaseEstimator, TransformerMixin):
                 X_di[ind, j] = i # assign this interval id
         if hasattr(self, 'indx'):
             return pd.DataFrame(X_di, index=self.indx, columns=self.columns)
+        
         return X_di
 
     def fit_transform(self, X, y):
