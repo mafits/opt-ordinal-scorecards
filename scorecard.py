@@ -1,10 +1,13 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from sklearn.metrics import mean_squared_error, roc_auc_score, accuracy_score
-from sklearn.model_selection import GridSearchCV, StratifiedKFold
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
+
+# evaluation 
+from sklearn.metrics import mean_squared_error, roc_auc_score, accuracy_score
+from sklearn.model_selection import GridSearchCV, StratifiedKFold
+from sklearn.model_selection import train_test_split
 
 
 # ordinal to binary 
@@ -17,7 +20,13 @@ from libraries.caimcaim import CAIMD # https://github.com/airysen/caimcaim/blob/
 from sklearn.linear_model import LinearRegression
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
-from sklearn.model_selection import train_test_split
+from skglm.estimators import MCPRegression
+from skglm.datafits import Huber
+from skglm.penalties import MCPenalty
+from skglm.estimators import GeneralizedLinearEstimator
+from skglm.solvers import AndersonCD
+
+
 
 # regularization
 from sklearn.linear_model import Ridge
@@ -63,6 +72,8 @@ class Scorecard():
         
         self.test_X_disc = None
         
+        self.model_method = None
+        
         
 
     
@@ -75,6 +86,7 @@ class Scorecard():
         self.goal_num_nonzero_weights = num_nonzero_weights 
         self.categorical = categorical_columns
         self.encoding_method = encoding_method
+        self.model_method = model_method
         
         # get train and test data (75% train, 25% test)
         self.train_X, self.test_X, self.train_y, self.test_y = train_test_split(self.X, self.y, test_size=0.25, random_state=42)
@@ -107,9 +119,10 @@ class Scorecard():
         if model_method == "RSS": self.rss()
         elif model_method == "ML": self.max_likelihood()
         elif model_method == "MM": self.margin_max()
+        elif model_method == "BEYOND_L1": self.beyond_l1()
         
         # show weights
-        if show_prints: 
+        if show_prints and self.weights is not None: 
             print(f"{model_method} weights:\n", self.weights)
             plt.figure()
             plt.bar(self.weights['Feature'], self.weights['Weight'])
@@ -118,16 +131,17 @@ class Scorecard():
             plt.show()
         
         # get nonzero weights
-        self.nonzero_weights = self.weights[self.weights['Weight'] != 0]
-        if self.nonzero_weights.shape[0] < self.weights.shape[0]:
-            print("num of zero weights: ", self.weights.shape[0] - self.nonzero_weights.shape[0])
-            print("num of non-zero weights: ", self.nonzero_weights.shape[0])
-            print(self.nonzero_weights)
-            plt.figure()
-            plt.bar(self.nonzero_weights['Feature'], self.nonzero_weights['Weight'])
-            plt.xticks(rotation=90)
-            plt.title('ML non-zero weights')
-            plt.show()
+        if self.weights is not None: 
+            self.nonzero_weights = self.weights[self.weights['Weight'] != 0]
+            if self.nonzero_weights.shape[0] < self.weights.shape[0]:
+                print("num of zero weights: ", self.weights.shape[0] - self.nonzero_weights.shape[0])
+                print("num of non-zero weights: ", self.nonzero_weights.shape[0])
+                print(self.nonzero_weights)
+                plt.figure()
+                plt.bar(self.nonzero_weights['Feature'], self.nonzero_weights['Weight'])
+                plt.xticks(rotation=90)
+                plt.title('ML non-zero weights')
+                plt.show()
         
         return self.model, self.weights
         
@@ -211,23 +225,23 @@ class Scorecard():
     
     
     # encoding
-    @staticmethod
-    def get_bins(thresholds, values):
-        bins = np.digitize(values, thresholds)
-        return bins
-        # list of bin number for each row
-        
     # 1 out of k
     def disc_1_out_of_k(self, X_to_encode):
         X_disc = []
         # for each column in X_to_encode, create a one-hot encoding of the bins
         for col in X_to_encode.columns:
-            bin = np.digitize(X_to_encode[col], self.thresholds[col]) # gets bin number of each row
+            if col in self.categorical:
+                bin = pd.Categorical(X_to_encode[col], categories=self.thresholds[col]).codes 
+                num_bins = len(self.thresholds[col])
+            else:
+                bin = np.digitize(X_to_encode[col], self.thresholds[col]) # gets bin number of each row
+                X_to_encode[col] = X_to_encode[col].astype(float) 
+                num_bins = len(self.thresholds[col]) + 1 
             bins_df = pd.get_dummies(bin, prefix=f'feat{col}-bin', prefix_sep='').astype(int) # one hot encoding
             
             # add missing columns (if some bins are not present in the data)
             missing_cols = []
-            for i in range(1, len(self.thresholds[col]) + 1):
+            for i in range(1, num_bins):
                 col_name = f'feat{col}-bin{i}'
                 if col_name not in bins_df.columns:
                     missing_cols.append(pd.Series(0, index=bins_df.index, name=col_name))
@@ -241,27 +255,43 @@ class Scorecard():
             
             # add bins of the column to the list
             X_disc.append(bins_df)
-        
         X_disc = pd.concat(X_disc, axis=1)
+        
         # show self.X_disc
-        if self.show_prints: print("X_disc shape: ", X_disc.shape)
-        if self.show_prints: print("X_disc columns: ", X_disc.columns)
-        if self.show_prints: print("X_disc head: ", X_disc.head())
+        if self.show_prints: 
+            print("X_disc shape: ", X_disc.shape)
+            print("X_disc columns: ", X_disc.columns)
+            print("X_disc head: ", X_disc.head())
         
         return X_disc
+    
     
     # differential coding
     def disc_diff_coding(self, X_to_encode):
         X_disc = []
         for col in X_to_encode.columns:
-            bins = self.get_bins(self.thresholds[col], X_to_encode[col]) # gets bin number of each row
-            num_bins = len(self.thresholds[col]) + 1
+            if col in self.categorical:
+                bin = pd.Categorical(X_to_encode[col], categories=self.thresholds[col]).codes
+                num_bins = len(self.thresholds[col])
+            else:
+                X_to_encode[col] = X_to_encode[col].astype(float)
+                bin = np.digitize(X_to_encode[col], self.thresholds[col]) # gets bin number of each row
+                num_bins = len(self.thresholds[col]) + 1
+            
             bin_df = pd.DataFrame(0, index=X_to_encode.index, columns=[f'feat{col}-bin{i}' for i in range(1, num_bins)])
             for i in range(1, num_bins):
-                bin_df[f'feat{col}-bin{i}'] = (bins >= i).astype(int)
+                bin_df[f'feat{col}-bin{i}'] = (bin >= i).astype(int)
             
             X_disc.append(bin_df)
+        
         X_disc = pd.concat(X_disc, axis=1)
+        
+        # sort columns    
+        if self.show_prints: 
+            print("X_disc shape: ", X_disc.shape)
+            print("X_disc columns: ", X_disc.columns)
+            print("X_disc head: ", X_disc.head())
+        
         return X_disc
     
     
@@ -275,11 +305,12 @@ class Scorecard():
     
     def grid_search(self, model, param_grid, cv=10):
         if self.goal_num_nonzero_weights is None:
-            grid_search = GridSearchCV(estimator=model, param_grid=param_grid, cv=cv)
+            grid_search = GridSearchCV(estimator=model, param_grid=param_grid, cv=cv, verbose=2)
         else:
-            grid_search = GridSearchCV(estimator=model, param_grid=param_grid, cv=cv, scoring=self.custom_scorer)
+            grid_search = GridSearchCV(estimator=model, param_grid=param_grid, cv=cv, scoring=self.custom_scorer, verbose=2)
         
         grid_search.fit(self.train_X, np.ravel(self.train_y))
+        
         return grid_search
     
     def get_weights(self):
@@ -289,7 +320,7 @@ class Scorecard():
         self.weights = pd.DataFrame({'Feature': feature_names, 'Weight': weights})
         #return weights_df
 
-    # RSS --> não está a funcionar pq Lasso tá à espera de valores contínuos
+    # RSS --> não funciona pq Lasso tá à espera de valores contínuos
     def rss(self): 
         linear_regression = Lasso()
         param_grid = {'alpha': [0.001, 0.01, 0.1, 0.4, 0.6, 0.9, 0.99, 1.0]}
@@ -300,13 +331,17 @@ class Scorecard():
     
     # maximum likelihood (GLM with binomial response and logit link function)
     def max_likelihood(self):
-        logistic = LogisticRegression(solver = 'liblinear', penalty = 'l1', max_iter=10000)
         alpha_values = [0.001, 0.01, 0.1, 0.4, 0.6, 0.9, 1.0]
-        param_grid = {'C': [1/a for a in alpha_values]} # inverse of regularization strength
-        grid_search_logistic = self.grid_search(logistic, param_grid)
+        param_grid = {
+            'C': [1/a for a in alpha_values], # inverse of regularization strength
+            'class_weight': ['balanced', None]
+        }
         
-        if self.show_prints: print("ML best parameters: ", grid_search_logistic.best_params_)
+        logistic = LogisticRegression(solver = 'liblinear', penalty = 'l1', max_iter=10000)
+        grid_search_logistic = self.grid_search(logistic, param_grid)
         best_alpha = 1/grid_search_logistic.best_params_['C']
+
+        if self.show_prints: print("ML best parameters: ", grid_search_logistic.best_params_)
         if self.show_prints: print("ML best alpha: ", best_alpha)
         self.model = grid_search_logistic.best_estimator_
         self.get_weights()
@@ -319,9 +354,19 @@ class Scorecard():
         }
         svm = SVC(kernel='linear')
         #svm = svm_problem(app_y, disc_app_X)
-        grid_search_svm = self.grid_search(svm,  param_grid)
+        grid_search_svm = self.grid_search(svm,  param_grid, cv=5)
         self.model = grid_search_svm.best_estimator_
         self.weights = self.get_weights()
+        
+    def beyond_l1(self):
+        self.model = GeneralizedLinearEstimator(
+            datafit=Huber(delta=1.),
+            penalty=MCPenalty(alpha=1e-2, gamma=3),
+            solver=AndersonCD()
+        )
+        #self.model = MCPRegression()
+        self.weights = self.get_weights()
+
 
 
     # evaluate the model on the test set
@@ -344,9 +389,12 @@ class Scorecard():
         if self.show_prints:            
             results_df = pd.DataFrame({'predictions': y_pred, 'true values': self.test_y_og})
             print(results_df.head(10))
+        
+        if self.model_method == "BEYOND_L1":
+            # round weights in y_pred to closer integers
+            y_pred = np.round(y_pred).astype(int)
             
-        
-        
+            
         # calculate and show metrics
         mse = mean_squared_error(self.test_y_og, y_pred)
         accuracy = accuracy_score(self.test_y_og, y_pred)
@@ -358,6 +406,7 @@ class Scorecard():
                 
         return mse, accuracy#, auc
 
+    
     def cross_val_score(self, n_splits=10):   
         kf = StratifiedKFold(n_splits=n_splits)
         MSEs = [] # mean squared error
@@ -435,6 +484,7 @@ class Scorecard():
             accuracies.append(accuracy)
             sparsities.append(sparsity)
             if self.show_prints: print(f"threshold: {threshold}, accuracy: {accuracy}, sparsity: {sparsity}")
+        
         if self.show_prints: print(f"infbins, accuracy: {infbins_accuracy}, sparsity: {infbins_num_zero_weights}")
 
         # plot
@@ -451,6 +501,7 @@ class Scorecard():
         # inf bins threshold=0 point
         plt.scatter(infbins_num_zero_weights, infbins_accuracy, color='green', marker='o', s=60, label='0')
         plt.text(infbins_num_zero_weights, infbins_accuracy, 'infbins', fontsize=10, ha='left', va='bottom', color='green')
+
         handles = [plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=colors[i], label=f'{thresholds[i]}', markersize=8) for i in range(len(thresholds))]
         handles.append(plt.Line2D([0], [0], marker='*', color='w', markerfacecolor='blue', label='CAIM', markersize=12))
         handles.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='green', label='infbins', markersize=8))
@@ -459,6 +510,3 @@ class Scorecard():
         plt.ylabel('accuracy')
         plt.title('accuracy vs sparsity')
         plt.show()
-
-        
-    

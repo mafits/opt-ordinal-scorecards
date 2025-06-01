@@ -174,9 +174,9 @@ class CAIMD(BaseEstimator, TransformerMixin):
         for j in range(X.shape[1]):
             if j in categorical:
                 continue
-            sh = list(map(int, scheme[j])) # get the cut off points for the feature as integers
+            sh = list(map(float, scheme[j])) # get the cut off points for the feature as integers
             sh[-1] = sh[-1] + 1 # add one to the last cut off point, to ensure that the last interval is inclusive
-            xj = X[:, j].astype(int) # get the feature as int
+            xj = X[:, j].astype(float) # get the feature as float
             
             # xi = xi[np.invert(np.isnan(xi))]
             
