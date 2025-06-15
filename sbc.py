@@ -25,8 +25,8 @@ class SBC():
         if not np.issubdtype(y.dtype, np.integer):
             if mapping is None:
                 new_y = pd.Series(pd.factorize(y)[0])
-                # show the mapping
                 self.mapping = dict(enumerate(pd.factorize(y)[1]))
+                # show the mapping 
                 print("mapping: ", self.mapping)
                 y = new_y
             else:
@@ -55,9 +55,7 @@ class SBC():
         print("new num features: ", new_X.shape[1])
         print("new num target classes: ", len(np.unique(new_y)))
         print("new num observations: ", new_X.shape[0], " (original num observations *", self.s, ")")
-        
         print(new_data.head())
-        new_X_columns = new_X.columns
         
         return new_X, new_y
     

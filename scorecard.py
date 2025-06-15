@@ -5,10 +5,10 @@ import matplotlib.cm as cm
 import matplotlib.colors as mcolors
 
 # evaluation 
-from sklearn.metrics import mean_squared_error, roc_auc_score, accuracy_score
+from sklearn.metrics import balanced_accuracy_score, mean_squared_error, roc_auc_score, accuracy_score
 from sklearn.model_selection import GridSearchCV, StratifiedKFold
 from sklearn.model_selection import train_test_split
-
+from sklearn.model_selection import learning_curve
 
 # ordinal to binary 
 from sbc import SBC
@@ -25,14 +25,11 @@ from skglm.datafits import Huber
 from skglm.penalties import MCPenalty
 from skglm.estimators import GeneralizedLinearEstimator
 from skglm.solvers import AndersonCD
-
-
-
-# regularization
+from sparselm.model import AdaptiveLasso
 from sklearn.linear_model import Ridge
 from sklearn.linear_model import Lasso
 from sklearn.linear_model import ElasticNet
-from sklearn.model_selection import learning_curve
+
 
 
 
@@ -42,6 +39,7 @@ class Scorecard():
         self.X = None
         self.X_columns = None
         self.y = None
+        self.categorical = None
         
         # train and test data
         self.test_X = None
@@ -54,39 +52,43 @@ class Scorecard():
         self.train_X_og = None
         self.train_y_og = None
         self.test_X_og = None
-        
-        # discretized and encoded data
-        self.X_disc = []
-        
+
+        # discretization thresholds and encoded data
         self.thresholds = None
+        self.X_disc = []
+        self.test_X_disc = None
+        
         self.sbc = SBC()
+        self.use_sbc = False
+        
+        # model and weights
         self.model = None
         self.weights = None
         self.nonzero_weights = None
-        self.show_prints = True
-        self.use_sbc = False
-        self.goal_num_nonzero_weights = None
-        self.categorical = None
-        self.accuracy = None
         self.encoding_method = None
+        self.model_method = None    
+        self.params = None  # parameters for the model, if needed
         
-        self.test_X_disc = None
+        # metrics
+        self.goal_num_nonzero_weights = None
+        self.accuracy = None
         
-        self.model_method = None
+        self.show_prints = True
+        
         
         
 
     
-    def fit(self, X, y, categorical_columns, thresholds_method, encoding_method, model_method, use_sbc=False, mapping=None, num_nonzero_weights=None, show_prints=True):
+    def fit(self, X, y, categorical_columns, thresholds_method, encoding_method, model_method, use_sbc=False, mapping=None, num_nonzero_weights=None, show_prints=True, params=None):
         self.X = X
-        self.X_columns = X.columns
         self.y = y
-        self.show_prints = show_prints
-        self.use_sbc = use_sbc
-        self.goal_num_nonzero_weights = num_nonzero_weights 
         self.categorical = categorical_columns
         self.encoding_method = encoding_method
         self.model_method = model_method
+        self.use_sbc = use_sbc
+        self.show_prints = show_prints
+        self.goal_num_nonzero_weights = num_nonzero_weights 
+        self.params = params
         
         # get train and test data (75% train, 25% test)
         self.train_X, self.test_X, self.train_y, self.test_y = train_test_split(self.X, self.y, test_size=0.25, random_state=42)
@@ -97,6 +99,7 @@ class Scorecard():
         self.test_X_og = self.test_X.copy()
         self.test_y_og = self.test_y.copy()
         
+        # if the problem is ordinal, use SBC to transform it to binary
         if use_sbc:
             print("SBC reduction of train set")
             self.train_X, self.train_y = self.sbc.reduction(self.train_X, self.train_y, mapping)
@@ -120,6 +123,7 @@ class Scorecard():
         elif model_method == "ML": self.max_likelihood()
         elif model_method == "MM": self.margin_max()
         elif model_method == "BEYOND_L1": self.beyond_l1()
+        elif model_method == "ADAPTIVE_LASSO": self.adaptive_lasso()
         
         # show weights
         if show_prints and self.weights is not None: 
@@ -130,9 +134,9 @@ class Scorecard():
             plt.title('ML weights')
             plt.show()
         
-        # get nonzero weights
-        if self.weights is not None: 
+            # get nonzero weights
             self.nonzero_weights = self.weights[self.weights['Weight'] != 0]
+            
             if self.nonzero_weights.shape[0] < self.weights.shape[0]:
                 print("num of zero weights: ", self.weights.shape[0] - self.nonzero_weights.shape[0])
                 print("num of non-zero weights: ", self.nonzero_weights.shape[0])
@@ -142,6 +146,10 @@ class Scorecard():
                 plt.xticks(rotation=90)
                 plt.title('ML non-zero weights')
                 plt.show()
+            else:
+                print("all weights are non-zero")
+                if model_method == "ADAPTIVE_LASSO":
+                    print("number of weights bigger than 1.0e-20: ", np.sum(np.abs(self.weights['Weight']) > 1.0e-20))
         
         return self.model, self.weights
         
@@ -173,7 +181,6 @@ class Scorecard():
         
         # for categorical features
         # sort the unique values and make thresholds be the values in between each pair of consecutive values
-        
         for i, col in enumerate(self.categorical):
             self.thresholds[col] = np.unique(self.train_X[col].astype(str))
             self.thresholds[col] = list(self.thresholds[col])
@@ -201,9 +208,11 @@ class Scorecard():
     def discretize_infbins(self):
         self.thresholds = {}
         for col in self.train_X.columns:
+            # if the column is categorical, use unique values as thresholds
             if col in self.categorical:
                 self.thresholds[col] = np.unique(self.train_X[col].astype(str))
                 self.thresholds[col] = list(self.thresholds[col])
+            # if the column is numerical, use the points in between 2 consecutive values as thresholds
             else:
                 sorted_col = np.unique(self.train_X[col])
                 sorted_col = sorted_col.astype(float)  # ensure the values are floats
@@ -297,6 +306,7 @@ class Scorecard():
     
     
     # model
+    # custom scorer for grid search, that returns the number of non-zero weights
     def custom_scorer(self, estimator, X, y):
         estimator.fit(X, np.ravel(y))
         weights = estimator.coef_[0]
@@ -304,59 +314,97 @@ class Scorecard():
         return -abs(num_nonzero_weights - self.goal_num_nonzero_weights)
     
     def grid_search(self, model, param_grid, cv=10):
-        if self.goal_num_nonzero_weights is None:
-            grid_search = GridSearchCV(estimator=model, param_grid=param_grid, cv=cv, verbose=2)
-        else:
-            grid_search = GridSearchCV(estimator=model, param_grid=param_grid, cv=cv, scoring=self.custom_scorer, verbose=2)
+        # if a goal number of non-zero weights is not specified, use accuracy as the scoring metric        
+        grid_search = GridSearchCV(estimator=model, param_grid=param_grid, cv=cv)
+        # else, use custom scorer
+        if self.goal_num_nonzero_weights is not None: 
+            grid_search.scoring= self.custom_scorer
         
+        if self.show_prints: grid_search.verbose=2
         grid_search.fit(self.train_X, np.ravel(self.train_y))
-        
-        return grid_search
-    
-    def get_weights(self):
-        self.model.fit(self.X_disc,  np.ravel(self.train_y))
-        weights = self.model.coef_[0]
-        feature_names = self.X_disc.columns
-        self.weights = pd.DataFrame({'Feature': feature_names, 'Weight': weights})
-        #return weights_df
 
-    # RSS --> não funciona pq Lasso tá à espera de valores contínuos
+        return grid_search
+        
+
+    # RSS
     def rss(self): 
         linear_regression = Lasso()
-        param_grid = {'alpha': [0.001, 0.01, 0.1, 0.4, 0.6, 0.9, 0.99, 1.0]}
-        grid_search_rss = self.grid_search(linear_regression, param_grid)
-        if self.show_prints: print("RSS best parameters: ", grid_search_rss.best_params_)
-        self.model = grid_search_rss.best_estimator_
+        
+        # if params are provided, use them
+        if self.params is not None:
+            # put params in Lasso
+            for key, value in self.params.items():
+                setattr(linear_regression, key, value)
+            self.model = linear_regression
+        
+        # else, use grid search to find the best parameters
+        else:
+            param_grid = {'alpha': [0.001, 0.01, 0.1, 0.4, 0.6, 0.9, 0.99, 1.0]}
+            grid_search_rss = self.grid_search(linear_regression, param_grid)
+            if self.show_prints: print("RSS best parameters: ", grid_search_rss.best_params_)
+            self.model = grid_search_rss.best_estimator_
+        
+        # get weights
         self.get_weights()
     
     # maximum likelihood (GLM with binomial response and logit link function)
     def max_likelihood(self):
-        alpha_values = [0.001, 0.01, 0.1, 0.4, 0.6, 0.9, 1.0]
-        param_grid = {
-            'C': [1/a for a in alpha_values], # inverse of regularization strength
-            'class_weight': ['balanced', None]
-        }
-        
         logistic = LogisticRegression(solver = 'liblinear', penalty = 'l1', max_iter=10000)
-        grid_search_logistic = self.grid_search(logistic, param_grid)
-        best_alpha = 1/grid_search_logistic.best_params_['C']
+        
+        # if params are provided, use them
+        if self.params is not None:
+            for key, value in self.params.items():
+                setattr(logistic, key, value)
+            self.model = logistic
+        
+        # else, use grid search to find the best parameters
+        else:
+            alpha_values = [0.001, 0.01, 0.1, 0.4, 0.6, 0.9, 1.0]
+            param_grid = {
+                'C': [1/a for a in alpha_values], # inverse of regularization strength
+                'class_weight': ['balanced', None]
+            }
+            
+            grid_search_logistic = self.grid_search(logistic, param_grid)
+            best_alpha = 1/grid_search_logistic.best_params_['C']
 
-        if self.show_prints: print("ML best parameters: ", grid_search_logistic.best_params_)
-        if self.show_prints: print("ML best alpha: ", best_alpha)
-        self.model = grid_search_logistic.best_estimator_
-        self.get_weights()
+            if self.show_prints: print("ML best parameters: ", grid_search_logistic.best_params_)
+            if self.show_prints: print("ML best alpha: ", best_alpha)
+            self.model = grid_search_logistic.best_estimator_
+        
+        # get weights
+        self.model.fit(self.X_disc,  np.ravel(self.train_y))
+        weights = self.model.coef_[0]
+        feature_names = self.X_disc.columns
+        self.weights = pd.DataFrame({'Feature': feature_names, 'Weight': weights})
     
     # margin maximization (linear SVM)
     def margin_max(self):
-        param_grid = {
-            'C': [2**i for i in range(-10, 11)],
-            'class_weight': ['balanced', None],
-        }
         svm = SVC(kernel='linear')
-        #svm = svm_problem(app_y, disc_app_X)
-        grid_search_svm = self.grid_search(svm,  param_grid, cv=5)
-        self.model = grid_search_svm.best_estimator_
-        self.weights = self.get_weights()
+        
+        # if params are provided, use them
+        if self.params is not None:
+            # put params in SVC
+            for key, value in self.params.items():
+                setattr(svm, key, value)
+            self.model = svm
+        
+        # else, use grid search to find the best parameters
+        else: 
+            param_grid = {
+                'C': [2**i for i in range(-10, 8)],
+                'class_weight': ['balanced', None]#,
+                #'kernel': ['linear', 'rbf', 'poly', 'sigmoid']
+            }
+            grid_search_svm = self.grid_search(svm,  param_grid, cv=5)
+            self.model = grid_search_svm.best_estimator_
+            if self.show_prints: print("MM best parameters: ", grid_search_svm.best_params_)
+
+        # get weights
+        self.model.fit(self.X_disc,  np.ravel(self.train_y))
+        weights = self.model.coef_[0]
+        feature_names = self.X_disc.columns
+        self.weights = pd.DataFrame({'Feature': feature_names, 'Weight': weights})
         
     def beyond_l1(self):
         self.model = GeneralizedLinearEstimator(
@@ -364,15 +412,37 @@ class Scorecard():
             penalty=MCPenalty(alpha=1e-2, gamma=3),
             solver=AndersonCD()
         )
-        #self.model = MCPRegression()
-        self.weights = self.get_weights()
-
+        self.model.fit(self.X_disc, np.ravel(self.train_y))
+        
+        # get weights
+        weights = self.model.coef_.ravel()
+        feature_names = self.X_disc.columns
+        self.weights = pd.DataFrame({'Feature': feature_names, 'Weight': weights})
+        
+    def adaptive_lasso(self):
+        alasso = AdaptiveLasso(fit_intercept=False)
+        if self.params is not None:
+            for key, value in self.params.items():
+                setattr(alasso, key, value)
+            self.model = alasso
+        else:
+            param_grid = {'alpha': np.logspace(-8, 2, 10)}
+            grid_search_alasso = self.grid_search(alasso, param_grid)
+            if self.show_prints: print("Adaptive Lasso best parameters: ", grid_search_alasso.best_params_)
+            self.model = grid_search_alasso.best_estimator_
+        
+        # get weights
+        self.model.fit(self.X_disc,  np.ravel(self.train_y))
+        weights = self.model.coef_
+        feature_names = self.X_disc.columns
+        self.weights = pd.DataFrame({'Feature': feature_names, 'Weight': weights})
 
 
     # evaluate the model on the test set
     def evaluate(self):
         if self.show_prints: print("\nevaluate")
-        # get encoded version of test sett
+        
+        # get encoded version of test set
         if self.show_prints: print("encoding test set")
         if self.encoding_method == "1_OUT_OF_K": self.test_X_disc = self.disc_1_out_of_k(self.test_X)
         elif self.encoding_method == "DIFF_CODING": self.test_X_disc = self.disc_diff_coding(self.test_X)
@@ -380,6 +450,11 @@ class Scorecard():
         # evaluate the model on the test set
         y_pred = self.model.predict(self.test_X_disc)
         #y_pred_proba = self.model.predict_proba(self.test_X_disc)[:, 1]
+        
+        if self.model_method == "BEYOND_L1" or self.model_method == "ADAPTIVE_LASSO" or self.model_method == "RSS":
+            # round weights in y_pred to closer integers
+            y_pred = np.round(y_pred).astype(int)
+            
         
         # show predictions vs true values
         if self.use_sbc:
@@ -390,19 +465,33 @@ class Scorecard():
             results_df = pd.DataFrame({'predictions': y_pred, 'true values': self.test_y_og})
             print(results_df.head(10))
         
-        if self.model_method == "BEYOND_L1":
-            # round weights in y_pred to closer integers
-            y_pred = np.round(y_pred).astype(int)
-            
+        
             
         # calculate and show metrics
         mse = mean_squared_error(self.test_y_og, y_pred)
         accuracy = accuracy_score(self.test_y_og, y_pred)
+        balanced_accuracy = balanced_accuracy_score(self.test_y_og, y_pred)
         #auc = roc_auc_score(self.test_y_og, y_pred_proba)
         
         print("mse: ", mse)
         print("accuracy: ", accuracy)
+        print("balanced accuracy: ", balanced_accuracy)
         #print("auc: ", auc)
+        
+        y_pred_2 = self.model.predict(self.X_disc)
+        if self.model_method == "BEYOND_L1" or self.model_method == "ADAPTIVE_LASSO" or self.model_method == "RSS":
+            # round weights in y_pred to closer integers
+            y_pred_2 = np.round(y_pred_2).astype(int)
+            
+        if self.use_sbc:
+            y_pred_2 = self.sbc.classif(y_pred_2, do_mapping=False)
+            if(self.sbc.mapping is not None):
+                self.train_y_og = self.sbc.apply_mapping(pd.Series(self.train_y_og))
+        
+        if self.show_prints: 
+            print("accuracy on train set: ", accuracy_score(self.train_y_og, y_pred_2))
+            print("mse on train set: ", mean_squared_error(self.train_y_og, y_pred_2))
+            print("balanced accuracy on train set: ", balanced_accuracy_score(self.train_y_og, y_pred_2))
                 
         return mse, accuracy#, auc
 
@@ -473,7 +562,7 @@ class Scorecard():
             sparsity = int(np.sum(selected_weights != 0)) # number of non-zero weights
             
 
-            # calculate y_pred using scorecard.model with selected weights
+            # calculate y_pred with selected weights using logistic regression
             selected_weights_series = pd.Series(selected_weights, index=self.test_X_disc.columns)
             logits = self.test_X_disc.values @ selected_weights_series
             probs = 1 / (1 + np.exp(-logits))
