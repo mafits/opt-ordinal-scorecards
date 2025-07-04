@@ -599,3 +599,50 @@ class Scorecard():
         plt.ylabel('accuracy')
         plt.title('accuracy vs sparsity')
         plt.show()
+        
+        
+        
+    def show_scorecard(self):
+        # make a table with Feature Name | Bin | Weight
+        scorecard_rows = []
+        scorecard_table = pd.DataFrame(columns=['Feature', 'Bin', 'Points'])
+        for col in self.X.columns:
+            # get the weights for the column
+            col_weights = self.weights[self.weights['Feature'].str.contains(col)]
+            if col_weights.empty:
+                continue
+            #print("col_weights: ", col_weights)
+            
+            # get the bins for the column
+            bins = []
+            if col in self.categorical:
+                bins = self.thresholds[col]
+            else:
+                thresholds = self.thresholds[col]
+                num_bins = len(thresholds) + 1
+                for i in range(num_bins):
+                    if i == 0:
+                        lower = -np.inf
+                        upper = thresholds[0]
+                    elif i == num_bins - 1:
+                        lower = thresholds[-1]
+                        upper = np.inf
+                    else:
+                        lower = thresholds[i - 1]
+                        upper = thresholds[i]
+                    bins.append(f'bin{i+1}: {{{lower}, {upper}}}')
+                    # take first bin
+                bins.remove(bins[0])
+            
+            # add rows to the scorecard - for each col name, for each bin
+            for i, bin in enumerate(bins):
+                points = col_weights['Weight'].iloc[i]
+                # get second part of bin name (e.g. bin1: {lower, upper} -> lower, upper)
+                bin_val = bin.split(': ')[1] if ': ' in bin else bin
+                bin_val = bin_val.replace('{', '[').replace('}', '[')
+                #print("bin: ", bin_val)
+                if points != 0.0:
+                    scorecard_rows.append({'Feature': col, 'Bin': bin_val, 'Points': points})
+        
+        scorecard_table = pd.DataFrame(scorecard_rows, columns=['Feature', 'Bin', 'Points'])
+        print(scorecard_table)
