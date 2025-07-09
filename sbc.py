@@ -7,6 +7,7 @@ class SBC():
         self.K = None
         self.s = None
         self.mapping = None
+        self.sbc_column = None
     
     
     def reduction(self, X, y, mapping=None, h=1):
@@ -50,7 +51,12 @@ class SBC():
         new_data = pd.concat([new_X, new_y], axis=1)
         # rename binary label column
         new_data.columns = list(new_X.columns) + ['binary_label']
+        new_y = new_y.rename(columns={0: 'binary_label'})
         
+        # rename the last column to 'sbc_value'
+        new_X.rename(columns={new_X.columns[-1]: 'sbc_value'}, inplace=True)
+        self.sbc_column = 'sbc_value'
+       
         # print some information about the new data
         print("new num features: ", new_X.shape[1])
         print("new num target classes: ", len(np.unique(new_y)))

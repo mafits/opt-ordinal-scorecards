@@ -3,6 +3,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
+import re
 
 # evaluation 
 from sklearn.metrics import balanced_accuracy_score, mean_squared_error, roc_auc_score, accuracy_score
@@ -89,6 +90,7 @@ class Scorecard():
         self.show_prints = show_prints
         self.goal_num_nonzero_weights = num_nonzero_weights 
         self.params = params
+        self.X_columns = X.columns
         
         # get train and test data (75% train, 25% test)
         self.train_X, self.test_X, self.train_y, self.test_y = train_test_split(self.X, self.y, test_size=0.25, random_state=42)
@@ -105,6 +107,7 @@ class Scorecard():
             self.train_X, self.train_y = self.sbc.reduction(self.train_X, self.train_y, mapping)
             print("\nSBC reduction of test set")
             self.test_X, self.test_y = self.sbc.reduction(self.test_X, self.test_y, mapping)
+            #self.categorical.append(self.sbc.sbc_column)  # add sbc_column to categorical features            
         
         
         # discretization thresholds
@@ -124,6 +127,7 @@ class Scorecard():
         elif model_method == "MM": self.margin_max()
         elif model_method == "BEYOND_L1": self.beyond_l1()
         elif model_method == "ADAPTIVE_LASSO": self.adaptive_lasso()
+        elif model_method == "RiskSLIM": self.risk_slim()
         
         # show weights
         if show_prints and self.weights is not None: 
@@ -232,7 +236,6 @@ class Scorecard():
     
     
     
-    
     # encoding
     # 1 out of k
     def disc_1_out_of_k(self, X_to_encode):
@@ -302,6 +305,30 @@ class Scorecard():
             print("X_disc head: ", X_disc.head())
         
         return X_disc
+    
+    
+    def disc_categorical(self, X_to_encode):
+        # for each feature, the values correspond to the bins the observation belongs to
+        X_disc = X_to_encode.copy()
+        for col in X_to_encode.columns:
+            if col in self.categorical:
+                # For categorical features, map values to bin numbers
+                bin_values = pd.Categorical(X_to_encode[col], categories=self.thresholds[col]).codes
+                X_disc[col] = bin_values
+            else:
+                # For numerical features, digitize to get bin numbers
+                X_to_encode[col] = X_to_encode[col].astype(float)
+                bin_values = np.digitize(X_to_encode[col], self.thresholds[col])
+                X_disc[col] = bin_values
+        
+        # sort columns    
+        if self.show_prints: 
+            print("X_disc shape: ", X_disc.shape)
+            print("X_disc columns: ", X_disc.columns)
+            print("X_disc head: ", X_disc.head())
+        
+        return X_disc
+            
     
     
     
@@ -437,6 +464,37 @@ class Scorecard():
         feature_names = self.X_disc.columns
         self.weights = pd.DataFrame({'Feature': feature_names, 'Weight': weights})
 
+    def replace_feat(self, col):
+        if col.startswith('feat'):
+            match = re.match(r'feat(\d+)', col)
+            if match:
+                idx = int(match.group(1))
+                return col.replace(f'feat{idx}', self.X_columns.tolist()[idx])
+        return col
+    
+    def rename_column_names(self, data):
+        for col in data.columns[1:]:
+            feat_number = col.split('-')[0].replace('feat', '')
+            # if feat_number is not a number, skip it
+            if not feat_number.isdigit():
+                continue
+            col_thresholds = self.thresholds[int(feat_number)]
+            bin_number = col.split('-')[1].replace('bin', '')
+            if bin_number == '0':
+                new_col_name = col.split('-')[0] + '_lessorequal' + str(col_thresholds[0])
+            else:
+                new_col_name = col.split('-')[0] + '_greaterthan' + str(col_thresholds[int(bin_number)-1])
+            data.rename(columns={col: new_col_name}, inplace=True)
+
+        #  - feature names to original names
+        data.columns = [self.replace_feat(col) for col in data.columns]
+
+    def risk_slim(self):
+        data = self.X_disc.copy()
+        data.insert(0, 'binary_label', self.train_y)
+        data['binary_label'] = data['binary_label'].replace({0: -1})
+        self.rename_column_names(data)
+        data.to_csv('datasets/sbc/risk_slim_data.csv', index=False)
 
     # evaluate the model on the test set
     def evaluate(self):
@@ -465,6 +523,8 @@ class Scorecard():
             results_df = pd.DataFrame({'predictions': y_pred, 'true values': self.test_y_og})
             print(results_df.head(10))
         
+        # normalized logistic loss
+        logistic_loss = np.mean(np.log(1 + np.exp(-y_pred * self.test_y_og)))
         
             
         # calculate and show metrics
@@ -476,6 +536,7 @@ class Scorecard():
         print("mse: ", mse)
         print("accuracy: ", accuracy)
         print("balanced accuracy: ", balanced_accuracy)
+        print("logistic loss: ", logistic_loss)
         #print("auc: ", auc)
         
         y_pred_2 = self.model.predict(self.X_disc)
@@ -492,6 +553,7 @@ class Scorecard():
             print("accuracy on train set: ", accuracy_score(self.train_y_og, y_pred_2))
             print("mse on train set: ", mean_squared_error(self.train_y_og, y_pred_2))
             print("balanced accuracy on train set: ", balanced_accuracy_score(self.train_y_og, y_pred_2))
+            print("logistic loss on train set: ", np.mean(np.log(1 + np.exp(-y_pred_2 * self.train_y_og))))
                 
         return mse, accuracy#, auc
 
