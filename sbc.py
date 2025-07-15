@@ -10,20 +10,22 @@ class SBC():
         self.sbc_column = None
     
     
-    def reduction(self, X, y, mapping=None, h=1):
+    def reduction(self, X, y, mapping=None, h=1, s=None):
         # num of classes
         self.K = len(np.unique(y))
-        
-        # print some information about the original data
         print("number of features: ", X.shape[1])
         print("original num target classes: ", self.K)
         print("original num observations: ", X.shape[0])
         
-        # num of parallel hyperplanes to be created (and replicas)
-        self.s = self.K-1
+        # num of classes defining each hyperplane
+        if s is None:
+            self.s = self.K-1
+        else:
+            self.s = s
         
         # if class labels not integer, convert to integer
         if not np.issubdtype(y.dtype, np.integer):
+            # if a mapping is not provided, create one
             if mapping is None:
                 new_y = pd.Series(pd.factorize(y)[0])
                 self.mapping = dict(enumerate(pd.factorize(y)[1]))
@@ -31,36 +33,47 @@ class SBC():
                 print("mapping: ", self.mapping)
                 y = new_y
             else:
+                # if mapping starts with 0, shift it to start with 1
+                if 0 in mapping.keys():
+                    mapping = {k+1: v for k, v in mapping.items()}
+               
                 # apply mapping dictionary to y
                 print("using provided mapping: ", mapping)
                 y = pd.Series(y.map(lambda v: {v_:k_ for k_, v_ in mapping.items()}[v]))
                 self.mapping = mapping
         
-        # for each point, create s replicas each with a new feature in [0, h, h*2, ... h*(s-1)]
-        # the new label is a binary label
+        # for each point, create (K-1) replicas each with (K-2) new features
+        # the new target label is a binary label
         new_X = []
         new_y = []
         for i in range(X.shape[0]): # for each point
-            for j in range(self.s): # for each replica
-                new_X.append(np.append(X.iloc[i].values, h*j)) 
-                new_label = y.iloc[i] > j
-                new_y.append(new_label.astype(int))
+            k = y.iloc[i]  # original class label
+            for q in range(self.K - 1):  # for each replica (= number of hyperplanes)
+                new_variables = [0] * (self.K-2) # create (K-2) new variables
+                if q > 0:
+                    new_variables[q-1] = 1
+                new_point = np.concatenate((X.iloc[i, :], new_variables))
+                new_X.append(new_point)
+                
+                # create the binary label
+                if k-1 <= q:
+                    new_y.append(1) # C1  
+                else:  
+                    new_y.append(0) # C2
         
         new_X = pd.DataFrame(new_X).reset_index(drop=True)
+        # rename last (K-2) columns to sbcol1, sbcol2, ..., sbcol(K-2)
+        new_X.columns = list(X.columns) + [f'sbcol{i+1}' for i in range(self.K-2)]
         new_y = pd.DataFrame(new_y).reset_index(drop=True)
-        new_data = pd.concat([new_X, new_y], axis=1)
         # rename binary label column
-        new_data.columns = list(new_X.columns) + ['binary_label']
-        new_y = new_y.rename(columns={0: 'binary_label'})
+        new_y.columns = ['binary_label']
         
-        # rename the last column to 'sbc_value'
-        new_X.rename(columns={new_X.columns[-1]: 'sbc_value'}, inplace=True)
-        self.sbc_column = 'sbc_value'
-       
+        new_data = pd.concat([new_X, new_y], axis=1)
+
         # print some information about the new data
-        print("new num features: ", new_X.shape[1])
+        print("new num features: ", new_X.shape[1], " (original num features +", self.K - 2, ")")
         print("new num target classes: ", len(np.unique(new_y)))
-        print("new num observations: ", new_X.shape[0], " (original num observations *", self.s, ")")
+        print("new num observations: ", new_X.shape[0], " (original num observations *", self.K - 1, ")")
         print(new_data.head())
         
         return new_X, new_y
@@ -74,12 +87,12 @@ class SBC():
         print(all_labels)
         
         # get the class of the point
-        # if all replicas are 0, then the class is 0
-        # if one is 1 and the rest are 0, then the class is 1
-        # if two are 1 and the rest are 0, then the class is 2
+        # if all replicas are 0, then the class is K
+        # if one is 1 and the rest are 0, then the class is K-1
+        # if two are 1 and the rest are 0, then the class is K-2
         # ...
-        # if all replicas are 1, then the class is K
-        final_labels = np.sum(all_labels, axis=1)
+        # if all replicas are 1, then the class is 1
+        final_labels = self.K - np.sum(all_labels, axis=1)
         print("predicted labels (before mapping): ", final_labels)
         
         # transform back to original labels using the mapping

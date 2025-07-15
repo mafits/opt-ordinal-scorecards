@@ -107,7 +107,6 @@ class Scorecard():
             self.train_X, self.train_y = self.sbc.reduction(self.train_X, self.train_y, mapping)
             print("\nSBC reduction of test set")
             self.test_X, self.test_y = self.sbc.reduction(self.test_X, self.test_y, mapping)
-            #self.categorical.append(self.sbc.sbc_column)  # add sbc_column to categorical features            
         
         
         # discretization thresholds
@@ -167,12 +166,12 @@ class Scorecard():
         index_categorical = [self.train_X.columns.get_loc(col) for col in self.categorical]
         caim = CAIMD(list(self.categorical))
         
-        # remove sbc_column
+        # remove sbc columns
         X_aux = self.train_X.copy()
         if self.use_sbc:
-            sbc_column = self.train_X.columns[-1]
-            # remove sbc_column from X_aux
-            X_aux = X_aux.drop(columns=[sbc_column])
+            sbc_columns = self.train_X.columns[-(self.sbc.K-2):]
+            # remove sbc_columns from X_aux
+            X_aux = X_aux.drop(columns=sbc_columns)
 
         # get thresholds
         caim.fit_transform(X_aux, self.train_y) # fit() and transform()
@@ -189,11 +188,12 @@ class Scorecard():
             self.thresholds[col] = np.unique(self.train_X[col].astype(str))
             self.thresholds[col] = list(self.thresholds[col])
             
-        # do thresholds for sbc_column (= the values of the column)
+        # do thresholds for sbc_columns (= the values of the columns)
         if self.use_sbc:
-            self.thresholds[sbc_column] = {float(val) for val in self.train_X[sbc_column]}
-            self.thresholds[sbc_column] = list(self.thresholds[sbc_column])
-        
+            for sbc_column in sbc_columns:
+                self.thresholds[sbc_column] = {float(val) for val in self.train_X[sbc_column]}
+                self.thresholds[sbc_column] = list(self.thresholds[sbc_column])
+
         # print thresholds
         if self.show_prints: 
             print("\nthresholds ", self.thresholds)
