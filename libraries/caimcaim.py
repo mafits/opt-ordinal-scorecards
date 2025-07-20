@@ -144,7 +144,7 @@ class CAIMD(BaseEstimator, TransformerMixin):
                                               ' Add it to categorical list!')
 
             self.split_scheme[j] = mainscheme
-            print('#', j, ' GLOBAL CAIM ', global_caim)
+            #print('#', j, ' GLOBAL CAIM ', global_caim)
         return self
 
     def transform(self, X):

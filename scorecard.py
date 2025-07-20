@@ -7,9 +7,11 @@ import re
 
 # evaluation 
 from sklearn.metrics import balanced_accuracy_score, mean_squared_error, roc_auc_score, accuracy_score
-from sklearn.model_selection import GridSearchCV, StratifiedKFold
+from sklearn.model_selection import GridSearchCV, ParameterGrid, StratifiedKFold
 from sklearn.model_selection import train_test_split
 from sklearn.model_selection import learning_curve
+from sklearn.metrics import confusion_matrix
+import seaborn as sns
 
 # ordinal to binary 
 from sbc import SBC
@@ -30,6 +32,10 @@ from sparselm.model import AdaptiveLasso
 from sklearn.linear_model import Ridge
 from sklearn.linear_model import Lasso
 from sklearn.linear_model import ElasticNet
+from sklearn.base import clone
+from sklearn.model_selection import KFold, ParameterGrid
+
+
 
 
 
@@ -45,82 +51,68 @@ class Scorecard():
         # train and test data
         self.test_X = None
         self.test_y = None
-        self.train_X = None
-        self.train_y = None
+        self.train_and_val_X = None
+        self.train_and_val_y = None
         
-        # original data (before SBC, discretization and encoding)
+        # original train and test data 
         self.test_y_og = None
         self.train_X_og = None
         self.train_y_og = None
         self.test_X_og = None
 
         # discretization thresholds and encoded data
+        self.thresholds_method = None
+        self.encoding_method = None
         self.thresholds = None
-        self.X_disc = []
+        self.encoded_train_X = None
         self.test_X_disc = None
         
         self.sbc = SBC()
         self.use_sbc = False
+        self.K = None  # number of ordinal categories
+        self.mapping = None  # mapping for ordinal categories, if needed
         
         # model and weights
         self.model = None
         self.weights = None
         self.nonzero_weights = None
-        self.encoding_method = None
         self.model_method = None    
-        self.params = None  # parameters for the model, if needed
-        
+        self.params = None  # parameters for the model
+        self.file_name = None  # risk slim data file name
+
         # metrics
         self.goal_num_nonzero_weights = None
         self.accuracy = None
-        
         self.show_prints = True
         
-        
-        
+       
+
 
     
-    def fit(self, X, y, categorical_columns, thresholds_method, encoding_method, model_method, use_sbc=False, mapping=None, num_nonzero_weights=None, show_prints=True, params=None):
+    def fit(self, X, y, categorical_columns, thresholds_method, encoding_method, model_method, params=None, use_sbc=False, K=None, mapping=None, file_name=None, show_prints=True):
         self.X = X
         self.y = y
         self.categorical = categorical_columns
+        self.thresholds_method = thresholds_method
         self.encoding_method = encoding_method
         self.model_method = model_method
-        self.use_sbc = use_sbc
-        self.show_prints = show_prints
-        self.goal_num_nonzero_weights = num_nonzero_weights 
         self.params = params
-        self.X_columns = X.columns
+        self.use_sbc = use_sbc
+        self.K = K
+        self.mapping = mapping
+        self.show_prints = show_prints
+        self.file_name = file_name
         
         # get train and test data (75% train, 25% test)
-        self.train_X, self.test_X, self.train_y, self.test_y = train_test_split(self.X, self.y, test_size=0.25, random_state=42)
-        
+        self.train_and_val_X, self.test_X, self.train_and_val_y, self.test_y = train_test_split(self.X, self.y, test_size=0.25, random_state=42)
+
         # transform from ordinal to binary
-        self.train_X_og = self.train_X.copy()
-        self.train_y_og = self.train_y.copy()
+        self.train_X_og = self.train_and_val_X.copy()
+        self.train_y_og = self.train_and_val_y.copy()
         self.test_X_og = self.test_X.copy()
         self.test_y_og = self.test_y.copy()
         
-        # if the problem is ordinal, use SBC to transform it to binary
-        if use_sbc:
-            print("SBC reduction of train set")
-            self.train_X, self.train_y = self.sbc.reduction(self.train_X, self.train_y, mapping)
-            print("\nSBC reduction of test set")
-            self.test_X, self.test_y = self.sbc.reduction(self.test_X, self.test_y, mapping)
-        
-        
-        # discretization thresholds
-        print('\ndiscretization thresholds')
-        if thresholds_method == "CAIM": self.discretize_caim()
-        elif thresholds_method == "INF_BINS": self.discretize_infbins()
-        
-        # encoding
-        print('\nencoding')
-        if encoding_method == "1_OUT_OF_K": self.X_disc = self.disc_1_out_of_k(self.train_X)
-        elif encoding_method == "DIFF_CODING": self.X_disc = self.disc_diff_coding(self.train_X)
-            
-        # model (get weights)
-        print('\nmodel')
+        # model
         if model_method == "RSS": self.rss()
         elif model_method == "ML": self.max_likelihood()
         elif model_method == "MM": self.margin_max()
@@ -128,127 +120,89 @@ class Scorecard():
         elif model_method == "ADAPTIVE_LASSO": self.adaptive_lasso()
         elif model_method == "RiskSLIM": self.risk_slim()
         
-        # show weights
-        if show_prints and self.weights is not None: 
-            print(f"{model_method} weights:\n", self.weights)
-            plt.figure()
-            plt.bar(self.weights['Feature'], self.weights['Weight'])
-            plt.xticks(rotation=90)
-            plt.title('ML weights')
-            plt.show()
-        
-            # get nonzero weights
-            self.nonzero_weights = self.weights[self.weights['Weight'] != 0]
-            
-            if self.nonzero_weights.shape[0] < self.weights.shape[0]:
-                print("num of zero weights: ", self.weights.shape[0] - self.nonzero_weights.shape[0])
-                print("num of non-zero weights: ", self.nonzero_weights.shape[0])
-                print(self.nonzero_weights)
-                plt.figure()
-                plt.bar(self.nonzero_weights['Feature'], self.nonzero_weights['Weight'])
-                plt.xticks(rotation=90)
-                plt.title('ML non-zero weights')
-                plt.show()
-            else:
-                print("all weights are non-zero")
-                if model_method == "ADAPTIVE_LASSO":
-                    print("number of weights bigger than 1.0e-20: ", np.sum(np.abs(self.weights['Weight']) > 1.0e-20))
+        # get weights
+        self.get_weights()
         
         return self.model, self.weights
         
             
         
-    
-    
     # discretization thresholds
+    def get_thresholds(self, X, y):
+        if self.thresholds_method == "CAIM":
+            return self.discretize_caim(X, y)
+        elif self.thresholds_method == "INFINITESIMAL_BINS":
+            return self.discretize_infbins(X)
+        else:
+            raise ValueError(f"Unknown thresholds method: {self.thresholds_method}")
+
     # CAIM
-    def discretize_caim(self):
-        index_categorical = [self.train_X.columns.get_loc(col) for col in self.categorical]
+    def discretize_caim(self, X, y):
+        thresholds = {}
+        index_categorical = [X.columns.get_loc(col) for col in self.categorical]
         caim = CAIMD(list(self.categorical))
         
-        # remove sbc columns
-        X_aux = self.train_X.copy()
-        if self.use_sbc:
-            sbc_columns = self.train_X.columns[-(self.sbc.K-2):]
-            # remove sbc_columns from X_aux
-            X_aux = X_aux.drop(columns=sbc_columns)
-
         # get thresholds
-        caim.fit_transform(X_aux, self.train_y) # fit() and transform()
+        caim.fit_transform(X, y) # fit() and transform()
         
         # get thresholds from caim.split_scheme (dict with column index : thresholds)
         # transform all values to floats
         # and keys with column indexes to column names 
-        index_non_categorical = [i for i in range(X_aux.shape[1]) if i not in index_categorical]
-        self.thresholds = {X_aux.columns[index_non_categorical[i]]: [float(val) for val in values] for i, (key, values) in enumerate(caim.split_scheme.items())}
+        index_non_categorical = [i for i in range(X.shape[1]) if i not in index_categorical]
+        thresholds = {X.columns[index_non_categorical[i]]: [float(val) for val in values] for i, (key, values) in enumerate(caim.split_scheme.items())}
         
         # for categorical features
         # sort the unique values and make thresholds be the values in between each pair of consecutive values
         for i, col in enumerate(self.categorical):
-            self.thresholds[col] = np.unique(self.train_X[col].astype(str))
-            self.thresholds[col] = list(self.thresholds[col])
-            
-        # do thresholds for sbc_columns (= the values of the columns)
-        if self.use_sbc:
-            for sbc_column in sbc_columns:
-                self.thresholds[sbc_column] = {float(val) for val in self.train_X[sbc_column]}
-                self.thresholds[sbc_column] = list(self.thresholds[sbc_column])
+            thresholds[col] = np.unique(X[col].astype(str))
+            thresholds[col] = list(thresholds[col])
 
-        # print thresholds
-        if self.show_prints: 
-            print("\nthresholds ", self.thresholds)
-            print("num of bins: ")
-            for i, (key, value) in enumerate(self.thresholds.items()):
-                if i in index_categorical:
-                    print(f"  {key}: {len(value)}")
-                else:
-                    # +1 because the number of bins is the number of thresholds + 1
-                    # e.g. if thresholds are [2, 4, 6], then there are 4 bins: (-inf, 2), [2, 4), [4, 6), [6, inf)
-                    print(f"  {key}: {len(value)+1}")
-            
-    
+        if self.categorical:
+            thresholds = {col: thresholds[col] for col in X.columns if col in thresholds}
+
+        return thresholds
+                   
     # INFINITESIMAL BINS
     # thresholds are the points in between 2 consecutive values in the sorted list
-    def discretize_infbins(self):
-        self.thresholds = {}
-        for col in self.train_X.columns:
+    def discretize_infbins(self, X):
+        thresholds = {}
+        for col in X.columns:
             # if the column is categorical, use unique values as thresholds
             if col in self.categorical:
-                self.thresholds[col] = np.unique(self.train_X[col].astype(str))
-                self.thresholds[col] = list(self.thresholds[col])
+                thresholds[col] = np.unique(X[col].astype(str))
+                thresholds[col] = list(thresholds[col])
             # if the column is numerical, use the points in between 2 consecutive values as thresholds
             else:
-                sorted_col = np.unique(self.train_X[col])
+                sorted_col = np.unique(X[col])
                 sorted_col = sorted_col.astype(float)  # ensure the values are floats
                 col_thresholds = (sorted_col[:-1] + sorted_col[1:]) / 2
-                self.thresholds[col] = col_thresholds.tolist()
-        
-        if self.show_prints: 
-            print("\nthresholds ", self.thresholds)
-            print("num of bins: ")
-            for key, value in self.thresholds.items():
-                if key in self.categorical:
-                    print(f"  {key}: {len(value)}")
-                else:
-                    print(f"  {key}: {len(value)+1}")
+                thresholds[col] = col_thresholds.tolist()
+            
+        return thresholds
 
-        return self.thresholds
-    
     
     
     # encoding
+    def get_encoded_X(self, X, thresholds):
+        if self.encoding_method == "1_OUT_OF_K":
+            return self.disc_1_out_of_k(X, thresholds)
+        elif self.encoding_method == "DIFF_CODING":
+            return self.disc_diff_coding(X, thresholds)
+        else:
+            raise ValueError(f"Unknown encoding method: {self.encoding_method}")
+    
     # 1 out of k
-    def disc_1_out_of_k(self, X_to_encode):
-        X_disc = []
+    def disc_1_out_of_k(self, X, thresholds):
+        encoded_X = []
         # for each column in X_to_encode, create a one-hot encoding of the bins
-        for col in X_to_encode.columns:
+        for col in X.columns:
             if col in self.categorical:
-                bin = pd.Categorical(X_to_encode[col], categories=self.thresholds[col]).codes 
-                num_bins = len(self.thresholds[col])
+                bin = pd.Categorical(X[col], categories=thresholds[col]).codes 
+                num_bins = len(thresholds[col])
             else:
-                bin = np.digitize(X_to_encode[col], self.thresholds[col]) # gets bin number of each row
-                X_to_encode[col] = X_to_encode[col].astype(float) 
-                num_bins = len(self.thresholds[col]) + 1 
+                bin = np.digitize(X[col], thresholds[col]) # gets bin number of each row
+                X[col] = X[col].astype(float) 
+                num_bins = len(thresholds[col]) + 1 
             bins_df = pd.get_dummies(bin, prefix=f'feat{col}-bin', prefix_sep='').astype(int) # one hot encoding
             
             # add missing columns (if some bins are not present in the data)
@@ -266,92 +220,121 @@ class Scorecard():
             bins_df = bins_df.reindex(sorted(bins_df.columns), axis=1)
             
             # add bins of the column to the list
-            X_disc.append(bins_df)
-        X_disc = pd.concat(X_disc, axis=1)
+            encoded_X.append(bins_df)
         
-        # show self.X_disc
-        if self.show_prints: 
-            print("X_disc shape: ", X_disc.shape)
-            print("X_disc columns: ", X_disc.columns)
-            print("X_disc head: ", X_disc.head())
-        
-        return X_disc
-    
+        # concatenate all encoded columns
+        encoded_X = pd.concat(encoded_X, axis=1)
+
+        return encoded_X
     
     # differential coding
-    def disc_diff_coding(self, X_to_encode):
-        X_disc = []
-        for col in X_to_encode.columns:
+    def disc_diff_coding(self, X, thresholds):
+        encoded_X = []
+        for col in X.columns:
             if col in self.categorical:
-                bin = pd.Categorical(X_to_encode[col], categories=self.thresholds[col]).codes
-                num_bins = len(self.thresholds[col])
+                bin = pd.Categorical(X[col], categories=thresholds[col]).codes
+                num_bins = len(thresholds[col])
             else:
-                X_to_encode[col] = X_to_encode[col].astype(float)
-                bin = np.digitize(X_to_encode[col], self.thresholds[col]) # gets bin number of each row
-                num_bins = len(self.thresholds[col]) + 1
+                X[col] = X[col].astype(float)
+                bin = np.digitize(X[col], thresholds[col]) # gets bin number of each row
+                num_bins = len(thresholds[col]) + 1
             
-            bin_df = pd.DataFrame(0, index=X_to_encode.index, columns=[f'feat{col}-bin{i}' for i in range(1, num_bins)])
+            bin_df = pd.DataFrame(0, index=X.index, columns=[f'feat{col}-bin{i}' for i in range(1, num_bins)])
             for i in range(1, num_bins):
                 bin_df[f'feat{col}-bin{i}'] = (bin >= i).astype(int)
             
-            X_disc.append(bin_df)
-        
-        X_disc = pd.concat(X_disc, axis=1)
-        
-        # sort columns    
-        if self.show_prints: 
-            print("X_disc shape: ", X_disc.shape)
-            print("X_disc columns: ", X_disc.columns)
-            print("X_disc head: ", X_disc.head())
-        
-        return X_disc
-    
-    
-    def disc_categorical(self, X_to_encode):
-        # for each feature, the values correspond to the bins the observation belongs to
-        X_disc = X_to_encode.copy()
-        for col in X_to_encode.columns:
-            if col in self.categorical:
-                # For categorical features, map values to bin numbers
-                bin_values = pd.Categorical(X_to_encode[col], categories=self.thresholds[col]).codes
-                X_disc[col] = bin_values
-            else:
-                # For numerical features, digitize to get bin numbers
-                X_to_encode[col] = X_to_encode[col].astype(float)
-                bin_values = np.digitize(X_to_encode[col], self.thresholds[col])
-                X_disc[col] = bin_values
-        
-        # sort columns    
-        if self.show_prints: 
-            print("X_disc shape: ", X_disc.shape)
-            print("X_disc columns: ", X_disc.columns)
-            print("X_disc head: ", X_disc.head())
-        
-        return X_disc
-            
-    
-    
+            encoded_X.append(bin_df)
+
+        # concatenate all encoded columns
+        encoded_X = pd.concat(encoded_X, axis=1)
+
+        return encoded_X
+      
+
     
     # model
-    # custom scorer for grid search, that returns the number of non-zero weights
-    def custom_scorer(self, estimator, X, y):
-        estimator.fit(X, np.ravel(y))
-        weights = estimator.coef_[0]
-        num_nonzero_weights = np.sum(weights != 0)
-        return -abs(num_nonzero_weights - self.goal_num_nonzero_weights)
+    def grid_search_scoring(self, estimator, X, y, val_X, val_y):
+        # learn thresholds from the training data
+        thresholds = self.get_thresholds(X, y)
+        
+        # if ordinal problem, do sbc to get binary version
+        if self.use_sbc:
+            sbc = SBC()
+            sbc_X, sbc_y = sbc.reduction(X, y, self.K, self.mapping)
+        
+            # do thresholds for sbc columns (the last K-2 columns from sbc_X, have one threshold each: 0.5)
+            sbc_columns = sbc_X.columns[-(sbc.K-2):]
+            for col in sbc_columns:
+                thresholds[col] = [0.5]
+            
+            X = sbc_X.copy()
+            y = sbc_y.copy()
     
-    def grid_search(self, model, param_grid, cv=10):
-        # if a goal number of non-zero weights is not specified, use accuracy as the scoring metric        
-        grid_search = GridSearchCV(estimator=model, param_grid=param_grid, cv=cv)
-        # else, use custom scorer
-        if self.goal_num_nonzero_weights is not None: 
-            grid_search.scoring= self.custom_scorer
+        # get encoded version of training X
+        encoded_X = self.get_encoded_X(X, thresholds)
         
-        if self.show_prints: grid_search.verbose=2
-        grid_search.fit(self.train_X, np.ravel(self.train_y))
+        # fit the model
+        estimator.fit(encoded_X, np.ravel(y))
 
-        return grid_search
+        # VALIDATION
+        # if ordinal problem, do sbc to get binary version of validation set
+        if self.use_sbc:
+            sbc = SBC()
+            sbc_val_X, sbc_val_y = sbc.reduction(val_X, val_y, self.K, self.mapping)
+            val_X = sbc_val_X.copy()
+
+        # encode the validation set given the thresholds
+        encoded_val_X = self.get_encoded_X(val_X, thresholds)
         
+        
+        # predict with the model
+        predictions = estimator.predict(encoded_val_X)
+        # tranform predictions to ordinal target
+        predictions = sbc.classif(predictions)
+        # calculate accuracy
+        accuracy = accuracy_score(val_y, predictions)
+
+        return accuracy
+
+    def grid_search(self, model, param_grid, cv=5):
+        # get combinations of parameters
+        param_combinations = list(ParameterGrid(param_grid))
+        
+        # save the best parameters and score
+        best_score = 0
+        best_params = None
+        results = []
+        
+        # for each combination of parameters, do cross-validation
+        for params in param_combinations:
+            print(f"testing parameters: {params}")
+            scores = []
+            
+            kf = KFold(n_splits=cv, shuffle=True, random_state=42)
+            # split the data into train and validation sets
+            for train_index, val_index in kf.split(self.train_and_val_X):
+                print("  fold ", len(scores) + 1)
+                train_X, val_X = self.train_and_val_X.iloc[train_index], self.train_and_val_X.iloc[val_index]
+                train_y, val_y = self.train_and_val_y.iloc[train_index], self.train_and_val_y.iloc[val_index]
+
+                # clone the model and set parameters
+                model = clone(model)
+                model.set_params(**params)
+                
+                # get the score for the current fold
+                score = self.grid_search_scoring(model, train_X, train_y, val_X, val_y)
+                scores.append(score)
+            
+            # calculate the mean score for the current combination of parameters
+            mean_score = np.mean(scores)
+            results.append((params, mean_score))
+            print(f"  mean score: {mean_score}")
+
+            if mean_score > best_score:
+                best_score = mean_score
+                best_params = params
+            
+        return best_params, best_score, results
 
     # RSS
     def rss(self): 
@@ -386,25 +369,21 @@ class Scorecard():
         
         # else, use grid search to find the best parameters
         else:
-            alpha_values = [0.001, 0.01, 0.1, 0.4, 0.6, 0.9, 1.0]
+            alpha_values = [0.001, 0.01, 0.1, 0.4, 0.6, 0.9, 0.99, 1.0]
             param_grid = {
                 'C': [1/a for a in alpha_values], # inverse of regularization strength
                 'class_weight': ['balanced', None]
             }
-            
-            grid_search_logistic = self.grid_search(logistic, param_grid)
-            best_alpha = 1/grid_search_logistic.best_params_['C']
 
-            if self.show_prints: print("ML best parameters: ", grid_search_logistic.best_params_)
-            if self.show_prints: print("ML best alpha: ", best_alpha)
-            self.model = grid_search_logistic.best_estimator_
-        
-        # get weights
-        self.model.fit(self.X_disc,  np.ravel(self.train_y))
-        weights = self.model.coef_[0]
-        feature_names = self.X_disc.columns
-        self.weights = pd.DataFrame({'Feature': feature_names, 'Weight': weights})
-    
+            best_params, best_score, results = self.grid_search(logistic, param_grid)
+            self.model = clone(logistic)
+            self.model.set_params(**best_params)
+            
+            best_alpha = 1 / best_params['C']
+            print("best parameters: ", best_params)
+            print("best alpha: ", best_alpha)
+            print("best score: ", best_score)
+
     # margin maximization (linear SVM)
     def margin_max(self):
         svm = SVC(kernel='linear')
@@ -423,29 +402,22 @@ class Scorecard():
                 'class_weight': ['balanced', None]#,
                 #'kernel': ['linear', 'rbf', 'poly', 'sigmoid']
             }
-            grid_search_svm = self.grid_search(svm,  param_grid, cv=5)
-            self.model = grid_search_svm.best_estimator_
-            if self.show_prints: print("MM best parameters: ", grid_search_svm.best_params_)
+            best_params, best_score, results = self.grid_search(svm,  param_grid, cv=5)
+            self.model = clone(svm)
+            self.model.set_params(**best_params)
+            
+            print("best parameters: ", best_params)
+            print("best score: ", best_score)
 
-        # get weights
-        self.model.fit(self.X_disc,  np.ravel(self.train_y))
-        weights = self.model.coef_[0]
-        feature_names = self.X_disc.columns
-        self.weights = pd.DataFrame({'Feature': feature_names, 'Weight': weights})
-        
+    # beyond l1 (MCP)
     def beyond_l1(self):
         self.model = GeneralizedLinearEstimator(
             datafit=Huber(delta=1.),
             penalty=MCPenalty(alpha=1e-2, gamma=3),
             solver=AndersonCD()
         )
-        self.model.fit(self.X_disc, np.ravel(self.train_y))
-        
-        # get weights
-        weights = self.model.coef_.ravel()
-        feature_names = self.X_disc.columns
-        self.weights = pd.DataFrame({'Feature': feature_names, 'Weight': weights})
-        
+
+    # adaptive lasso
     def adaptive_lasso(self):
         alasso = AdaptiveLasso(fit_intercept=False)
         if self.params is not None:
@@ -454,16 +426,14 @@ class Scorecard():
             self.model = alasso
         else:
             param_grid = {'alpha': np.logspace(-8, 2, 10)}
-            grid_search_alasso = self.grid_search(alasso, param_grid)
-            if self.show_prints: print("Adaptive Lasso best parameters: ", grid_search_alasso.best_params_)
-            self.model = grid_search_alasso.best_estimator_
+            best_params, best_score, results = self.grid_search(alasso, param_grid)
+            self.model = clone(alasso)
+            self.model.set_params(**best_params)
+            
+            print("best parameters: ", best_params)
+            print("best score: ", best_score)
         
-        # get weights
-        self.model.fit(self.X_disc,  np.ravel(self.train_y))
-        weights = self.model.coef_
-        feature_names = self.X_disc.columns
-        self.weights = pd.DataFrame({'Feature': feature_names, 'Weight': weights})
-
+    # risk slim
     def replace_feat(self, col):
         if col.startswith('feat'):
             match = re.match(r'feat(\d+)', col)
@@ -490,105 +460,189 @@ class Scorecard():
         data.columns = [self.replace_feat(col) for col in data.columns]
 
     def risk_slim(self):
-        data = self.X_disc.copy()
-        data.insert(0, 'binary_label', self.train_y)
+        X = self.train_and_val_X.copy()
+        y = self.train_and_val_y.copy()
+        thresholds = self.get_thresholds(X, y)
+
+        if self.use_sbc:
+            sbc = SBC()
+            sbc_X, sbc_y = sbc.reduction(X, y, self.K, self.mapping)
+            sbc_columns = sbc_X.columns[-(sbc.K-2):]
+            for col in sbc_columns:
+                thresholds[col] = [0.5]
+            
+            X = sbc_X.copy()
+        
+        encoded_X = self.get_encoded_X(X, thresholds)
+        
+        data = encoded_X.copy()
+        data.insert(0, 'binary_label', y)
         data['binary_label'] = data['binary_label'].replace({0: -1})
         self.rename_column_names(data)
-        data.to_csv('datasets/sbc/risk_slim_data.csv', index=False)
+        data_name = 'datasets/riskslim/' + self.file_name if self.file_name else 'datasets/sbc/risk_slim_data.csv'
+        data.to_csv(data_name, index=False)
+
+
+    def get_weights(self):
+        # learn thresholds from the training data
+        self.thresholds = self.get_thresholds(self.train_and_val_X, self.train_and_val_y)
+
+        # if ordinal problem, do sbc to get binary version
+        sbc = SBC()
+        sbc_X, sbc_y = sbc.reduction(self.train_and_val_X, self.train_and_val_y, self.K, self.mapping)
+
+        # do thresholds for sbc columns (the last K-2 columns from sbc_X, have one threshold each: 0.5)
+        sbc_columns = sbc_X.columns[-(sbc.K-2):]
+        for col in sbc_columns:
+            self.thresholds[col] = [0.5]
+
+        # get encoded version of training X
+        self.encoded_train_X = self.get_encoded_X(sbc_X, self.thresholds)
+
+        # fit the model
+        self.model.fit(self.encoded_train_X, np.ravel(sbc_y))
+
+        # get the weights
+        weights = self.model.coef_[0]
+        
+        # show the features and their weights as a DataFrame
+        self.weights = pd.DataFrame({
+            'Feature': self.encoded_train_X.columns,
+            'Weight': weights
+        })
+        print("\nFeature weights:")
+        print(self.weights)
+
+        # get non-zero weights
+        self.non_zero_weights = self.weights[self.weights['Weight'] != 0]
+        print("\nNon-zero weights:")
+        print(self.non_zero_weights)
+
 
     # evaluate the model on the test set
     def evaluate(self):
-        if self.show_prints: print("\nevaluate")
+        if self.use_sbc:
+            sbc = SBC()
+            sbc_test_X, sbc_test_y = sbc.reduction(self.test_X, self.test_y, self.K, self.mapping)
+            test_X = sbc_test_X.copy()
         
-        # get encoded version of test set
-        if self.show_prints: print("encoding test set")
-        if self.encoding_method == "1_OUT_OF_K": self.test_X_disc = self.disc_1_out_of_k(self.test_X)
-        elif self.encoding_method == "DIFF_CODING": self.test_X_disc = self.disc_diff_coding(self.test_X)
-        
-        # evaluate the model on the test set
-        y_pred = self.model.predict(self.test_X_disc)
-        #y_pred_proba = self.model.predict_proba(self.test_X_disc)[:, 1]
+        encoded_test_X = self.get_encoded_X(test_X, self.thresholds)
+
+        # predict with the model
+        test_predictions = self.model.predict(encoded_test_X)
         
         if self.model_method == "BEYOND_L1" or self.model_method == "ADAPTIVE_LASSO" or self.model_method == "RSS":
             # round weights in y_pred to closer integers
-            y_pred = np.round(y_pred).astype(int)
-            
-        
-        # show predictions vs true values
+            test_predictions = np.round(test_predictions).astype(int)
+
         if self.use_sbc:
-            y_pred = self.sbc.classif(y_pred, do_mapping=False)
-            if(self.sbc.mapping is not None):
-                self.test_y_og = self.sbc.apply_mapping(pd.Series(self.test_y_og))
-        if self.show_prints:            
-            results_df = pd.DataFrame({'predictions': y_pred, 'true values': self.test_y_og})
-            print(results_df.head(10))
+            # transform predictions to ordinal target
+            test_predictions = sbc.classif(test_predictions)
+
+            mapped_test_predictions = sbc.apply_mapping(pd.Series(test_predictions), self.mapping)
+            mapped_test_y = sbc.apply_mapping(self.test_y, self.mapping)
         
-        # normalized logistic loss
-        logistic_loss = np.mean(np.log(1 + np.exp(-y_pred * self.test_y_og)))
-        
-            
+        # show predictions vs true values side by side
+        results_df = pd.DataFrame({'True Value': mapped_test_y.values, 'Prediction': mapped_test_predictions.values})
+        print(results_df)
+
         # calculate and show metrics
-        mse = mean_squared_error(self.test_y_og, y_pred)
-        accuracy = accuracy_score(self.test_y_og, y_pred)
-        balanced_accuracy = balanced_accuracy_score(self.test_y_og, y_pred)
-        #auc = roc_auc_score(self.test_y_og, y_pred_proba)
+        mse = mean_squared_error(mapped_test_y, mapped_test_predictions)
+        accuracy = accuracy_score(mapped_test_y, mapped_test_predictions)
+        balanced_accuracy = balanced_accuracy_score(mapped_test_y, mapped_test_predictions)
+        logistic_loss = np.mean(np.log(1 + np.exp(-mapped_test_predictions * mapped_test_y)))
+        # number of far off predictions (more than 1 unit away from the true value)
+        if self.use_sbc: far_off = np.sum(np.abs(mapped_test_predictions - mapped_test_y) > 1)
+        # number of non zero weights
+        num_non_zero_weights = np.sum(self.weights != 0)
+        # model size = number of non-zero weights / number of all weights
+        model_size = num_non_zero_weights / len(self.weights)
         
         print("mse: ", mse)
         print("accuracy: ", accuracy)
         print("balanced accuracy: ", balanced_accuracy)
         print("logistic loss: ", logistic_loss)
-        #print("auc: ", auc)
+        if self.use_sbc:print("number of far off predictions: ", far_off)
+        print("number of non-zero weights: ", num_non_zero_weights)
+        print("model size (non-zero weights / all weights): ", model_size)
         
-        y_pred_2 = self.model.predict(self.X_disc)
+        # confusion matrix
+        cm = confusion_matrix(mapped_test_y, mapped_test_predictions)
+        plt.figure(figsize=(8, 6))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=np.unique(mapped_test_y), yticklabels=np.unique(mapped_test_y))
+        plt.xlabel('Predicted')
+        plt.ylabel('True')
+        plt.title('Confusion Matrix')
+        plt.show()
+        
+        test_predictions_2 = self.model.predict(self.encoded_train_X)
         if self.model_method == "BEYOND_L1" or self.model_method == "ADAPTIVE_LASSO" or self.model_method == "RSS":
             # round weights in y_pred to closer integers
-            y_pred_2 = np.round(y_pred_2).astype(int)
-            
+            test_predictions_2 = np.round(test_predictions_2).astype(int)
+
         if self.use_sbc:
-            y_pred_2 = self.sbc.classif(y_pred_2, do_mapping=False)
-            if(self.sbc.mapping is not None):
-                self.train_y_og = self.sbc.apply_mapping(pd.Series(self.train_y_og))
+            # transform predictions to ordinal target
+            test_predictions_2 = sbc.classif(test_predictions_2)
+            mapped_test_predictions_2 = sbc.apply_mapping(pd.Series(test_predictions_2), self.mapping)
+            mapped_train_y = sbc.apply_mapping(self.train_y_og, self.mapping)
         
-        if self.show_prints: 
-            print("accuracy on train set: ", accuracy_score(self.train_y_og, y_pred_2))
-            print("mse on train set: ", mean_squared_error(self.train_y_og, y_pred_2))
-            print("balanced accuracy on train set: ", balanced_accuracy_score(self.train_y_og, y_pred_2))
-            print("logistic loss on train set: ", np.mean(np.log(1 + np.exp(-y_pred_2 * self.train_y_og))))
-                
-        return mse, accuracy#, auc
+        print("accuracy on train set: ", accuracy_score(mapped_train_y, mapped_test_predictions_2))
+        print("mse on train set: ", mean_squared_error(mapped_train_y, mapped_test_predictions_2))
+        print("balanced accuracy on train set: ", balanced_accuracy_score(mapped_train_y, mapped_test_predictions_2))
+        print("logistic loss on train set: ", np.mean(np.log(1 + np.exp(-mapped_test_predictions_2 * mapped_train_y))))
 
-    
-    def cross_val_score(self, n_splits=10):   
-        kf = StratifiedKFold(n_splits=n_splits)
-        MSEs = [] # mean squared error
-        accuracies = [] 
-        AUCs = [] # area under the ROC curve
- 
-        for train_index, test_index in kf.split(self.X, self.y):
-            X_train, X_test = self.X.iloc[train_index], self.X.iloc[test_index]
-            y_train, y_test = self.y.iloc[train_index], self.y.iloc[test_index]
-
-            self.model.fit(X_train, np.ravel(y_train))
-            y_pred = self.model.predict(X_test)
+        
+    def show_scorecard(self):        
+        # make a table with Feature Name | Bin | Weight
+        scorecard_rows = []
+        scorecard_table = pd.DataFrame(columns=['Feature', 'Bin', 'Points'])
+        for col in self.X.columns:
+            # get the weights for the column
+            col_weights = self.weights[self.weights['Feature'].str.contains(col)]
+            if col_weights.empty:
+                continue
             
-            MSEs.append(mean_squared_error(y_test, y_pred))
-            accuracies.append(accuracy_score(y_test, y_pred))
-            #AUCs.append(roc_auc_score(y_test, model.predict_proba(X_test)[:, 1]))
-            if hasattr(self.model, "predict_proba"):
-                AUCs.append(roc_auc_score(y_test, self.model.predict_proba(X_test)[:, 1]))
+            # get the bins for the column
+            bins = []
+            if col in self.categorical:
+                bins = self.thresholds[col]
             else:
-                AUCs.append(roc_auc_score(y_test, y_pred))
+                thresholds = self.thresholds[col]
+                num_bins = len(thresholds) + 1
+                for i in range(num_bins):
+                    if i == 0:
+                        lower = -np.inf
+                        upper = thresholds[0]
+                    elif i == num_bins - 1:
+                        lower = thresholds[-1]
+                        upper = np.inf
+                    else:
+                        lower = thresholds[i - 1]
+                        upper = thresholds[i]
+                    bins.append(f'bin{i+1}: {{{lower}, {upper}}}')
+                    # take first bin
+                bins.remove(bins[0])
+            
+            # add rows to the scorecard - for each col name, for each bin
+            for i, bin in enumerate(bins):
+                points = col_weights['Weight'].iloc[i]
+                # get second part of bin name (e.g. bin1: {lower, upper} -> lower, upper)
+                bin_val = bin.split(': ')[1] if ': ' in bin else bin
+                bin_val = bin_val.replace('{', '[').replace('}', '[')
+                if points != 0.0:
+                    scorecard_rows.append({'Feature': col, 'Bin': bin_val, 'Points': points})
+        
+        scorecard_table = pd.DataFrame(scorecard_rows, columns=['Feature', 'Bin', 'Points'])
+        print(scorecard_table)
+        
+        # get weights of feat called sbc-column
+        if self.use_sbc:
+            sbc_columns = [col for col in self.weights['Feature'] if col.startswith('featsbcol')]
+            sbc_weights = self.weights[self.weights['Feature'].isin(sbc_columns)]
+            print("\nSBC columns weights:")
+            print(sbc_weights)
             
             
-            
-        if self.show_prints: print("MSEs: ", MSEs)
-        if self.show_prints: print("accuracies: ", accuracies)
-        if self.show_prints: print("AUCs: ", AUCs)
-    
-        if self.show_prints: print("mean MSE: ", np.mean(MSEs))
-        print("mean accuracy: ", np.mean(accuracies))
-        if self.show_prints: print("mean AUC: ", np.mean(AUCs))
-        return np.mean(MSEs), np.mean(accuracies), np.mean(AUCs)
 
     def plot_learning_curve(self, scoring='accuracy', cv=10):
 
@@ -662,49 +716,3 @@ class Scorecard():
         plt.title('accuracy vs sparsity')
         plt.show()
         
-        
-        
-    def show_scorecard(self):
-        # make a table with Feature Name | Bin | Weight
-        scorecard_rows = []
-        scorecard_table = pd.DataFrame(columns=['Feature', 'Bin', 'Points'])
-        for col in self.X.columns:
-            # get the weights for the column
-            col_weights = self.weights[self.weights['Feature'].str.contains(col)]
-            if col_weights.empty:
-                continue
-            #print("col_weights: ", col_weights)
-            
-            # get the bins for the column
-            bins = []
-            if col in self.categorical:
-                bins = self.thresholds[col]
-            else:
-                thresholds = self.thresholds[col]
-                num_bins = len(thresholds) + 1
-                for i in range(num_bins):
-                    if i == 0:
-                        lower = -np.inf
-                        upper = thresholds[0]
-                    elif i == num_bins - 1:
-                        lower = thresholds[-1]
-                        upper = np.inf
-                    else:
-                        lower = thresholds[i - 1]
-                        upper = thresholds[i]
-                    bins.append(f'bin{i+1}: {{{lower}, {upper}}}')
-                    # take first bin
-                bins.remove(bins[0])
-            
-            # add rows to the scorecard - for each col name, for each bin
-            for i, bin in enumerate(bins):
-                points = col_weights['Weight'].iloc[i]
-                # get second part of bin name (e.g. bin1: {lower, upper} -> lower, upper)
-                bin_val = bin.split(': ')[1] if ': ' in bin else bin
-                bin_val = bin_val.replace('{', '[').replace('}', '[')
-                #print("bin: ", bin_val)
-                if points != 0.0:
-                    scorecard_rows.append({'Feature': col, 'Bin': bin_val, 'Points': points})
-        
-        scorecard_table = pd.DataFrame(scorecard_rows, columns=['Feature', 'Bin', 'Points'])
-        print(scorecard_table)
