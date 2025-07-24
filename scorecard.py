@@ -6,12 +6,14 @@ import matplotlib.colors as mcolors
 import re
 
 # evaluation 
-from sklearn.metrics import balanced_accuracy_score, mean_squared_error, roc_auc_score, accuracy_score
+from sklearn.metrics import balanced_accuracy_score, mean_squared_error, roc_auc_score, accuracy_score, precision_score, recall_score, f1_score
 from sklearn.model_selection import GridSearchCV, ParameterGrid, StratifiedKFold
 from sklearn.model_selection import train_test_split
 from sklearn.model_selection import learning_curve
-from sklearn.metrics import confusion_matrix
+from sklearn.metrics import confusion_matrix, classification_report
 import seaborn as sns
+
+from imblearn.over_sampling import SMOTE
 
 # ordinal to binary 
 from sbc import SBC
@@ -85,6 +87,8 @@ class Scorecard():
         self.accuracy = None
         self.show_prints = True
         
+        self.data = None  # data prepared for risk slim
+        
        
 
 
@@ -105,33 +109,44 @@ class Scorecard():
         
         # get train and test data (75% train, 25% test)
         self.train_and_val_X, self.test_X, self.train_and_val_y, self.test_y = train_test_split(self.X, self.y, test_size=0.25, random_state=42)
-
-        # transform from ordinal to binary
+        
+        '''# do SMOTE on the training data
+        smote = SMOTE(sampling_strategy='auto', random_state=42)
+        self.train_and_val_X, self.train_and_val_y = smote.fit_resample(self.train_and_val_X, self.train_and_val_y)
+        # show the number of observations after SMOTE
+        print("Number of observations after SMOTE: ", self.train_and_val_X.shape[0])
+        print("Number of classes after SMOTE: ", len(np.unique(self.train_and_val_y)))
+        print("Target distribution after SMOTE: ", self.train_and_val_y.value_counts())'''
+        
+        # save original data
         self.train_X_og = self.train_and_val_X.copy()
         self.train_y_og = self.train_and_val_y.copy()
         self.test_X_og = self.test_X.copy()
         self.test_y_og = self.test_y.copy()
-        
+
         # model
         if model_method == "RSS": self.rss()
         elif model_method == "ML": self.max_likelihood()
         elif model_method == "MM": self.margin_max()
         elif model_method == "BEYOND_L1": self.beyond_l1()
         elif model_method == "ADAPTIVE_LASSO": self.adaptive_lasso()
-        elif model_method == "RiskSLIM": self.risk_slim()
+        elif model_method == "RiskSLIM": 
+            self.risk_slim()
+            return self.data  # risk slim does not need to fit a model, it just prepares the data for risk slim
         
         # get weights
         self.get_weights()
         
         return self.model, self.weights
         
-            
+    def thresholds(self):
+        return self.thresholds
         
     # discretization thresholds
     def get_thresholds(self, X, y):
         if self.thresholds_method == "CAIM":
             return self.discretize_caim(X, y)
-        elif self.thresholds_method == "INFINITESIMAL_BINS":
+        elif self.thresholds_method == "INF_BINS":
             return self.discretize_infbins(X)
         else:
             raise ValueError(f"Unknown thresholds method: {self.thresholds_method}")
@@ -200,8 +215,8 @@ class Scorecard():
                 bin = pd.Categorical(X[col], categories=thresholds[col]).codes 
                 num_bins = len(thresholds[col])
             else:
-                bin = np.digitize(X[col], thresholds[col]) # gets bin number of each row
-                X[col] = X[col].astype(float) 
+                X_col_float = X[col].astype(float)
+                bin = np.digitize(X_col_float, thresholds[col]) # gets bin number of each row
                 num_bins = len(thresholds[col]) + 1 
             bins_df = pd.get_dummies(bin, prefix=f'feat{col}-bin', prefix_sep='').astype(int) # one hot encoding
             
@@ -235,8 +250,8 @@ class Scorecard():
                 bin = pd.Categorical(X[col], categories=thresholds[col]).codes
                 num_bins = len(thresholds[col])
             else:
-                X[col] = X[col].astype(float)
-                bin = np.digitize(X[col], thresholds[col]) # gets bin number of each row
+                X_col_float = X[col].astype(float)
+                bin = np.digitize(X_col_float, thresholds[col]) # gets bin number of each row
                 num_bins = len(thresholds[col]) + 1
             
             bin_df = pd.DataFrame(0, index=X.index, columns=[f'feat{col}-bin{i}' for i in range(1, num_bins)])
@@ -274,7 +289,15 @@ class Scorecard():
         encoded_X = self.get_encoded_X(X, thresholds)
         
         # fit the model
-        estimator.fit(encoded_X, np.ravel(y))
+        if self.model_method == "ADAPTIVE_LASSO":
+            # if adaptive lasso, avançar se der exepction (hyperparameters are infeasible)
+            try:
+                estimator.fit(encoded_X, np.ravel(y))
+            except Exception as e:
+                print(f"AdaptiveLasso infeasible: {e}")
+                return 0.0
+        else:
+            estimator.fit(encoded_X, np.ravel(y))
 
         # VALIDATION
         # if ordinal problem, do sbc to get binary version of validation set
@@ -282,19 +305,28 @@ class Scorecard():
             sbc = SBC()
             sbc_val_X, sbc_val_y = sbc.reduction(val_X, val_y, self.K, self.mapping)
             val_X = sbc_val_X.copy()
-
+            
+        
         # encode the validation set given the thresholds
         encoded_val_X = self.get_encoded_X(val_X, thresholds)
         
         
-        # predict with the model
+        # predict
         predictions = estimator.predict(encoded_val_X)
-        # tranform predictions to ordinal target
-        predictions = sbc.classif(predictions)
+        
+        if self.model_method == "ADAPTIVE_LASSO":
+            # the predictions are probabilities between -1 and 1
+            predictions = (predictions >= 0.5).astype(int)
+
+        # if the problem is ordinal, transform predictions to ordinal target
+        if self.use_sbc:
+            predictions = sbc.classif(predictions)
+
         # calculate accuracy
         accuracy = accuracy_score(val_y, predictions)
+        #balanced_accuracy = balanced_accuracy_score(val_y, predictions)
 
-        return accuracy
+        return accuracy#balanced_accuracy
 
     def grid_search(self, model, param_grid, cv=5):
         # get combinations of parameters
@@ -335,6 +367,8 @@ class Scorecard():
                 best_params = params
             
         return best_params, best_score, results
+
+
 
     # RSS
     def rss(self): 
@@ -472,6 +506,7 @@ class Scorecard():
                 thresholds[col] = [0.5]
             
             X = sbc_X.copy()
+            y = sbc_y.copy()
         
         encoded_X = self.get_encoded_X(X, thresholds)
         
@@ -479,8 +514,10 @@ class Scorecard():
         data.insert(0, 'binary_label', y)
         data['binary_label'] = data['binary_label'].replace({0: -1})
         self.rename_column_names(data)
+        self.data = data
         data_name = 'datasets/riskslim/' + self.file_name if self.file_name else 'datasets/sbc/risk_slim_data.csv'
         data.to_csv(data_name, index=False)
+        
 
 
     def get_weights(self):
@@ -488,119 +525,167 @@ class Scorecard():
         self.thresholds = self.get_thresholds(self.train_and_val_X, self.train_and_val_y)
 
         # if ordinal problem, do sbc to get binary version
-        sbc = SBC()
-        sbc_X, sbc_y = sbc.reduction(self.train_and_val_X, self.train_and_val_y, self.K, self.mapping)
+        if self.use_sbc:
+            sbc = SBC()
+            sbc_X, sbc_y = sbc.reduction(self.train_and_val_X, self.train_and_val_y, self.K, self.mapping)
 
-        # do thresholds for sbc columns (the last K-2 columns from sbc_X, have one threshold each: 0.5)
-        sbc_columns = sbc_X.columns[-(sbc.K-2):]
-        for col in sbc_columns:
-            self.thresholds[col] = [0.5]
+            # do thresholds for sbc columns (the last K-2 columns from sbc_X, have one threshold each: 0.5)
+            sbc_columns = sbc_X.columns[-(sbc.K-2):]
+            for col in sbc_columns:
+                self.thresholds[col] = [0.5]
+                
+            self.train_and_val_X = sbc_X.copy()
+            self.train_and_val_y = sbc_y.copy()
 
         # get encoded version of training X
-        self.encoded_train_X = self.get_encoded_X(sbc_X, self.thresholds)
+        self.encoded_train_X = self.get_encoded_X(self.train_and_val_X, self.thresholds)
 
         # fit the model
-        self.model.fit(self.encoded_train_X, np.ravel(sbc_y))
+        self.model.fit(self.encoded_train_X, np.ravel(self.train_and_val_y))
 
         # get the weights
-        weights = self.model.coef_[0]
+        if self.model_method == "BEYOND_L1":
+            weights = self.model.coef_.ravel()
+        elif self.model_method == "ADAPTIVE_LASSO":
+            weights = self.model.coef_
+            weights[np.abs(weights) < 1e-18] = 0
+        else:
+            weights = self.model.coef_[0]
+        
         
         # show the features and their weights as a DataFrame
         self.weights = pd.DataFrame({
             'Feature': self.encoded_train_X.columns,
             'Weight': weights
         })
-        print("\nFeature weights:")
-        print(self.weights)
+        #print("\nFeature weights:")
+        #print(self.weights)
 
         # get non-zero weights
-        self.non_zero_weights = self.weights[self.weights['Weight'] != 0]
-        print("\nNon-zero weights:")
-        print(self.non_zero_weights)
+        #self.non_zero_weights = self.weights[self.weights['Weight'] != 0]
+        #print("\nNon-zero weights:")
+        #print(self.non_zero_weights)
 
 
     # evaluate the model on the test set
     def evaluate(self):
+        print("\nEvaluating the model on the test set...")
         if self.use_sbc:
             sbc = SBC()
             sbc_test_X, sbc_test_y = sbc.reduction(self.test_X, self.test_y, self.K, self.mapping)
-            test_X = sbc_test_X.copy()
+            self.test_X = sbc_test_X.copy()
         
-        encoded_test_X = self.get_encoded_X(test_X, self.thresholds)
+        encoded_test_X = self.get_encoded_X(self.test_X, self.thresholds)
 
         # predict with the model
         test_predictions = self.model.predict(encoded_test_X)
+        print("test predictions: ", test_predictions)
         
-        if self.model_method == "BEYOND_L1" or self.model_method == "ADAPTIVE_LASSO" or self.model_method == "RSS":
+        if self.model_method == "ADAPTIVE_LASSO":
             # round weights in y_pred to closer integers
+            test_predictions = (test_predictions >= 0.5).astype(int)
+        elif self.model_method == "BEYOND_L1":
             test_predictions = np.round(test_predictions).astype(int)
-
+        
         if self.use_sbc:
             # transform predictions to ordinal target
             test_predictions = sbc.classif(test_predictions)
-
-            mapped_test_predictions = sbc.apply_mapping(pd.Series(test_predictions), self.mapping)
-            mapped_test_y = sbc.apply_mapping(self.test_y, self.mapping)
+            if self.mapping is not None:
+                mapped_test_predictions = sbc.apply_mapping(pd.Series(test_predictions), self.mapping)
+                test_predictions = mapped_test_predictions.copy()
+                mapped_test_y = sbc.apply_mapping(self.test_y, self.mapping)
+                self.test_y = mapped_test_y.copy()
         
         # show predictions vs true values side by side
-        results_df = pd.DataFrame({'True Value': mapped_test_y.values, 'Prediction': mapped_test_predictions.values})
+        results_df = pd.DataFrame({'True Value': self.test_y.values, 'Prediction': pd.Series(test_predictions).values})
         print(results_df)
 
         # calculate and show metrics
-        mse = mean_squared_error(mapped_test_y, mapped_test_predictions)
-        accuracy = accuracy_score(mapped_test_y, mapped_test_predictions)
-        balanced_accuracy = balanced_accuracy_score(mapped_test_y, mapped_test_predictions)
-        logistic_loss = np.mean(np.log(1 + np.exp(-mapped_test_predictions * mapped_test_y)))
+        accuracy = accuracy_score(self.test_y, test_predictions)
+        precision = precision_score(self.test_y, test_predictions, average='weighted', zero_division=0)
+        recall = recall_score(self.test_y, test_predictions, average='weighted', zero_division=0)
+        f1 = f1_score(self.test_y, test_predictions, average='weighted', zero_division=0)
+        balanced_accuracy = balanced_accuracy_score(self.test_y, test_predictions)
+        logistic_loss = np.mean(np.log(1 + np.exp(-test_predictions * self.test_y)))
+        mse = mean_squared_error(self.test_y, test_predictions)
         # number of far off predictions (more than 1 unit away from the true value)
-        if self.use_sbc: far_off = np.sum(np.abs(mapped_test_predictions - mapped_test_y) > 1)
+        if self.use_sbc: far_off = np.sum(np.abs(test_predictions - self.test_y) > 1)
         # number of non zero weights
-        num_non_zero_weights = np.sum(self.weights != 0)
+        number_of_features = len(self.weights)
+        num_non_zero_weights = np.sum(self.weights['Weight'] != 0)
         # model size = number of non-zero weights / number of all weights
-        model_size = num_non_zero_weights / len(self.weights)
+        model_size = num_non_zero_weights / number_of_features
         
-        print("mse: ", mse)
         print("accuracy: ", accuracy)
+        print("precision: ", precision)
+        print("recall: ", recall)
+        print("f1 score: ", f1)
         print("balanced accuracy: ", balanced_accuracy)
         print("logistic loss: ", logistic_loss)
-        if self.use_sbc:print("number of far off predictions: ", far_off)
+        print("mse: ", mse)
+        if self.use_sbc: print("number of far off predictions: ", far_off)
+        print("number of features: ", number_of_features)
         print("number of non-zero weights: ", num_non_zero_weights)
         print("model size (non-zero weights / all weights): ", model_size)
         
         # confusion matrix
-        cm = confusion_matrix(mapped_test_y, mapped_test_predictions)
+        cm = confusion_matrix(self.test_y, test_predictions)
         plt.figure(figsize=(8, 6))
-        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=np.unique(mapped_test_y), yticklabels=np.unique(mapped_test_y))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=np.unique(test_predictions), yticklabels=np.unique(test_predictions))
         plt.xlabel('Predicted')
         plt.ylabel('True')
         plt.title('Confusion Matrix')
         plt.show()
+
+        # per-class accuracy
+        per_class_accuracy = cm.diagonal() / cm.sum(axis=1)
+        for idx, acc in enumerate(per_class_accuracy):
+            print(f"accuracy for class {np.unique(self.test_y)[idx]}: {acc:.3f}")
+        
+        #print(classification_report(self.test_y, test_predictions, zero_division=0))
         
         test_predictions_2 = self.model.predict(self.encoded_train_X)
-        if self.model_method == "BEYOND_L1" or self.model_method == "ADAPTIVE_LASSO" or self.model_method == "RSS":
-            # round weights in y_pred to closer integers
+        
+        if self.model_method == "ADAPTIVE_LASSO":
+            test_predictions_2 = (test_predictions_2 >= 0.5).astype(int)
+        elif self.model_method == "BEYOND_L1":
             test_predictions_2 = np.round(test_predictions_2).astype(int)
 
         if self.use_sbc:
             # transform predictions to ordinal target
             test_predictions_2 = sbc.classif(test_predictions_2)
-            mapped_test_predictions_2 = sbc.apply_mapping(pd.Series(test_predictions_2), self.mapping)
-            mapped_train_y = sbc.apply_mapping(self.train_y_og, self.mapping)
-        
-        print("accuracy on train set: ", accuracy_score(mapped_train_y, mapped_test_predictions_2))
-        print("mse on train set: ", mean_squared_error(mapped_train_y, mapped_test_predictions_2))
-        print("balanced accuracy on train set: ", balanced_accuracy_score(mapped_train_y, mapped_test_predictions_2))
-        print("logistic loss on train set: ", np.mean(np.log(1 + np.exp(-mapped_test_predictions_2 * mapped_train_y))))
+            if self.mapping is not None:
+                mapped_test_predictions_2 = sbc.apply_mapping(pd.Series(test_predictions_2), self.mapping)
+                test_predictions_2 = mapped_test_predictions_2.copy()
+                mapped_train_y = sbc.apply_mapping(self.train_y_og, self.mapping)
+                self.train_y_og = mapped_train_y.copy()
+            
+        print("\nEvaluating the model on the train set...")
+        print("accuracy on train set: ", accuracy_score(self.train_y_og, test_predictions_2))
+        print("precision on train set: ", precision_score(self.train_y_og, test_predictions_2, average='weighted', zero_division=0))
+        print("recall on train set: ", recall_score(self.train_y_og, test_predictions_2, average='weighted', zero_division=0))
+        print("f1 score on train set: ", f1_score(self.train_y_og, test_predictions_2, average='weighted', zero_division=0))
+        print("balanced accuracy on train set: ", balanced_accuracy_score(self.train_y_og, test_predictions_2))
+        print("logistic loss on train set: ", np.mean(np.log(1 + np.exp(-test_predictions_2 * self.train_y_og))))
+        print("mse on train set: ", mean_squared_error(self.train_y_og, test_predictions_2))
 
-        
-    def show_scorecard(self):        
+
+    def show_scorecard(self):
+        print("\nScorecard table:")        
         # make a table with Feature Name | Bin | Weight
         scorecard_rows = []
         scorecard_table = pd.DataFrame(columns=['Feature', 'Bin', 'Points'])
         for col in self.X.columns:
             # get the weights for the column
             col_weights = self.weights[self.weights['Feature'].str.contains(col)]
-            if col_weights.empty:
+            print(col_weights)
+            #if col_weights.empty:
+            #    continue
+
+            # if all weights are 0, skip the column
+            if col_weights['Weight'].sum() == 0:
                 continue
+            
             
             # get the bins for the column
             bins = []
