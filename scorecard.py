@@ -85,10 +85,7 @@ class Scorecard():
         # metrics
         self.goal_num_nonzero_weights = None
         self.accuracy = None
-        self.show_prints = True
-        
-        self.data = None  # data prepared for risk slim
-        
+        self.show_prints = True        
        
 
 
@@ -131,17 +128,14 @@ class Scorecard():
         elif model_method == "BEYOND_L1": self.beyond_l1()
         elif model_method == "ADAPTIVE_LASSO": self.adaptive_lasso()
         elif model_method == "RiskSLIM": 
-            self.risk_slim()
-            return self.data  # risk slim does not need to fit a model, it just prepares the data for risk slim
+            data = self.risk_slim()
+            return data  # risk slim does not need to fit a model, it just prepares the data for risk slim
         
         # get weights
         self.get_weights()
         
         return self.model, self.weights
-        
-    def thresholds(self):
-        return self.thresholds
-        
+            
     # discretization thresholds
     def get_thresholds(self, X, y):
         if self.thresholds_method == "CAIM":
@@ -518,6 +512,79 @@ class Scorecard():
         data_name = 'datasets/riskslim/' + self.file_name if self.file_name else 'datasets/sbc/risk_slim_data.csv'
         data.to_csv(data_name, index=False)
         
+        return data        
+
+    def riskslim_predicted_risk(self, total_points, a):
+        return 1.0/(1.0 + np.exp(-(a + total_points)))
+
+
+    def riskslim_points(self, features, points_list):    
+        total_points = 0.0
+        
+        for i in range(len(features)):
+            if features[i] == 1: # works just for 1ook!!!
+                total_points += points_list[i]
+
+        return total_points
+
+
+    def riskslim_prediction(self, features, points_list, a):
+        total_points = self.riskslim_points(features, points_list)
+        return self.riskslim_predicted_risk(total_points, a)
+
+
+    def evaluate_riskslim_model(self, points_list, sbc_X, threshold, a=0):
+        predictions = []
+        
+        # remove sbcol
+        num_sbc_col = len([col for col in sbc_X.columns if col.startswith('featsbcol')])
+        sbc_X = sbc_X.drop(columns=[col for col in sbc_X.columns if col.startswith('featsbcol')])
+        points_list = points_list[:-num_sbc_col]
+
+        for i in range(sbc_X.shape[0]):
+            features = sbc_X.iloc[i].values
+            prediction = self.riskslim_prediction(features, points_list, a)
+            predictions.append(prediction)
+            # round prediction to 0 or 1 based on threshold
+            if prediction >= threshold:
+                predictions[i] = 1
+            else:
+                predictions[i] = 0
+        
+        sbc = SBC()
+        predictions = pd.Series(predictions)  
+        predictions = sbc.classif(predictions, K=self.K, do_mapping=True)
+        y = sbc.apply_mapping(self.train_y_og, mapping=self.mapping)
+        
+        accuracy = accuracy_score(y, predictions)
+        balanced_accuracy = balanced_accuracy_score(y, predictions)
+        precision = precision_score(y, predictions, average='weighted', zero_division=0)
+        recall = recall_score(y, predictions, average='weighted')
+        f1 = f1_score(y, predictions, average='weighted')
+        mse = mean_squared_error(y, predictions)
+        print(f'accuracy: {accuracy}')
+        print(f'balance accuracy: {balanced_accuracy}')
+        print(f'precision: {precision}')
+        print(f'recall: {recall}')
+        print(f'f1 score: {f1}')
+        print(f'mean squared error: {mse}')
+        
+        # confusion matrix
+        cm = confusion_matrix(y, predictions)
+        plt.figure(figsize=(8, 6))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=np.unique(predictions), yticklabels=np.unique(predictions))
+        plt.xlabel('Predicted')
+        plt.ylabel('True')
+        plt.title('Confusion Matrix')
+        plt.show()
+
+        # per-class accuracy
+        per_class_accuracy = cm.diagonal() / cm.sum(axis=1)
+        for idx, acc in enumerate(per_class_accuracy):
+            print(f"accuracy for class {np.unique(y)[idx]}: {acc:.3f}")
+
+#        return predictions, accuracy
+
 
 
     def get_weights(self):

@@ -89,9 +89,12 @@ class SBC():
     
     
     
-    def classif(self, pred_sbc_y, do_mapping=True, show_print=True):
+    def classif(self, pred_sbc_y, K=None, do_mapping=True, show_print=True):
+        if K is not None:
+            self.K = K
         # get classification of all replicas of each point
-        all_labels = [pred_sbc_y[i:i + self.s] for i in range(0, len(pred_sbc_y), self.s)]
+        num_replicas = self.K - 1
+        all_labels = [pred_sbc_y[i:i + num_replicas] for i in range(0, len(pred_sbc_y), num_replicas)]
         all_labels = np.array(all_labels)
         #if show_print:
             #print(all_labels)
@@ -105,18 +108,7 @@ class SBC():
         # ...
         # if all replicas are 1, then the class is 1
         final_labels = np.sum(all_labels, axis=1) + 1
-        
-        
-        # TAMANHO DA SEQUENCIA DE 1s
-        '''final_labels = []
-        for binary_labels in all_labels:
-            count_ones = 0
-            for label in binary_labels:
-                if label == 1:
-                    count_ones += 1
-                else:
-                    break
-            final_labels.append(count_ones + 1)'''
+   
 
         #if show_print:
             #print("predicted labels (before mapping): ", final_labels)
