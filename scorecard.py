@@ -517,7 +517,6 @@ class Scorecard():
     def riskslim_predicted_risk(self, total_points, a):
         return 1.0/(1.0 + np.exp(-(a + total_points)))
 
-
     def riskslim_points(self, features, points_list):    
         total_points = 0.0
         
@@ -527,13 +526,12 @@ class Scorecard():
 
         return total_points
 
-
     def riskslim_prediction(self, features, points_list, a):
         total_points = self.riskslim_points(features, points_list)
         return self.riskslim_predicted_risk(total_points, a)
 
 
-    def evaluate_riskslim_model(self, points_list, sbc_X, threshold, a=0):
+    def evaluate_riskslim_model(self, points_list, sbc_X, a):
         predictions = []
         
         # remove sbcol
@@ -546,7 +544,7 @@ class Scorecard():
             prediction = self.riskslim_prediction(features, points_list, a)
             predictions.append(prediction)
             # round prediction to 0 or 1 based on threshold
-            if prediction >= threshold:
+            if prediction >= 0.5:
                 predictions[i] = 1
             else:
                 predictions[i] = 0
@@ -562,12 +560,14 @@ class Scorecard():
         recall = recall_score(y, predictions, average='weighted')
         f1 = f1_score(y, predictions, average='weighted')
         mse = mean_squared_error(y, predictions)
+        logistic_loss = np.mean(np.log(1 + np.exp(-predictions * y)))
         print(f'accuracy: {accuracy}')
         print(f'balance accuracy: {balanced_accuracy}')
         print(f'precision: {precision}')
         print(f'recall: {recall}')
         print(f'f1 score: {f1}')
         print(f'mean squared error: {mse}')
+        print(f'logistic loss: {logistic_loss}')
         
         # confusion matrix
         cm = confusion_matrix(y, predictions)
@@ -583,7 +583,6 @@ class Scorecard():
         for idx, acc in enumerate(per_class_accuracy):
             print(f"accuracy for class {np.unique(y)[idx]}: {acc:.3f}")
 
-#        return predictions, accuracy
 
 
 
