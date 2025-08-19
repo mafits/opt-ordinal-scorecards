@@ -27,7 +27,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
 from skglm.estimators import MCPRegression
 from skglm.datafits import Huber
-from skglm.penalties import MCPenalty
+from skglm.penalties import MCPenalty, WeightedL1, SCAD
 from skglm.estimators import GeneralizedLinearEstimator
 from skglm.solvers import AndersonCD
 from sparselm.model import AdaptiveLasso
@@ -265,20 +265,20 @@ class Scorecard():
     def grid_search_scoring(self, estimator, X, y, val_X, val_y):
         # learn thresholds from the training data
         thresholds = self.get_thresholds(X, y)
-        
+
         # if ordinal problem, do sbc to get binary version
         if self.use_sbc:
             sbc = SBC()
             sbc_X, sbc_y = sbc.reduction(X, y, self.K, self.mapping)
         
             # do thresholds for sbc columns (the last K-2 columns from sbc_X, have one threshold each: 0.5)
-            sbc_columns = sbc_X.columns[-(sbc.K-2):]
+            sbc_columns = sbc_X.columns[-(self.K-2):]
             for col in sbc_columns:
                 thresholds[col] = [0.5]
             
             X = sbc_X.copy()
             y = sbc_y.copy()
-    
+        
         # get encoded version of training X
         encoded_X = self.get_encoded_X(X, thresholds)
         
@@ -297,18 +297,16 @@ class Scorecard():
         # if ordinal problem, do sbc to get binary version of validation set
         if self.use_sbc:
             sbc = SBC()
-            sbc_val_X, sbc_val_y = sbc.reduction(val_X, val_y, self.K, self.mapping)
+            sbc_val_X, _ = sbc.reduction(val_X, val_y, self.K, self.mapping)
             val_X = sbc_val_X.copy()
-            
         
         # encode the validation set given the thresholds
         encoded_val_X = self.get_encoded_X(val_X, thresholds)
-        
-        
+
         # predict
         predictions = estimator.predict(encoded_val_X)
         
-        if self.model_method == "ADAPTIVE_LASSO":
+        if self.model_method == "ADAPTIVE_LASSO" or self.model_method == "BEYOND_L1":
             # the predictions are probabilities between -1 and 1
             predictions = (predictions >= 0.5).astype(int)
 
@@ -323,9 +321,13 @@ class Scorecard():
         return accuracy#balanced_accuracy
 
     def grid_search(self, model, param_grid, cv=5):
-        # get combinations of parameters
-        param_combinations = list(ParameterGrid(param_grid))
-        
+        if isinstance(param_grid, list):
+            param_combinations = []
+            for grid in param_grid:
+                param_combinations.append(grid)
+        else:
+            param_combinations = list(ParameterGrid(param_grid))
+            
         # save the best parameters and score
         best_score = 0
         best_params = None
@@ -344,8 +346,13 @@ class Scorecard():
                 train_y, val_y = self.train_and_val_y.iloc[train_index], self.train_and_val_y.iloc[val_index]
 
                 # clone the model and set parameters
-                model = clone(model)
-                model.set_params(**params)
+                if self.model_method == "BEYOND_L1":
+                    model = GeneralizedLinearEstimator()
+                    for key, value in params.items():
+                        setattr(model, key, value)
+                else:
+                    model = clone(model)
+                    model.set_params(**params)
                 
                 # get the score for the current fold
                 score = self.grid_search_scoring(model, train_X, train_y, val_X, val_y)
@@ -387,26 +394,38 @@ class Scorecard():
     
     # maximum likelihood (GLM with binomial response and logit link function)
     def max_likelihood(self):
-        logistic = LogisticRegression(solver = 'liblinear', penalty = 'l1', max_iter=10000)
-        
+        logistic = LogisticRegression(max_iter=10000)
+
         # if params are provided, use them
         if self.params is not None:
             for key, value in self.params.items():
                 setattr(logistic, key, value)
             self.model = logistic
-        
+
         # else, use grid search to find the best parameters
         else:
             alpha_values = [0.001, 0.01, 0.1, 0.4, 0.6, 0.9, 0.99, 1.0]
-            param_grid = {
-                'C': [1/a for a in alpha_values], # inverse of regularization strength
-                'class_weight': ['balanced', None]
-            }
+            param_grid = [
+                { 'solver': ['liblinear'], 
+                  'C': [1/a for a in alpha_values], 
+                  'penalty': ['l1']
+                },
+                { 'solver': ['saga'], 
+                  'C': [1/a for a in alpha_values], 
+                  'penalty': ['elasticnet'], 
+                  'l1_ratio': [0.4, 0.6, 0.8]
+                }
+            ]
 
-            best_params, best_score, results = self.grid_search(logistic, param_grid)
+            # flatten param_grid for ParameterGrid
+            all_params = []
+            for grid in param_grid:
+                all_params.extend(list(ParameterGrid(grid)))
+
+            best_params, best_score, results = self.grid_search(logistic, all_params)
             self.model = clone(logistic)
             self.model.set_params(**best_params)
-            
+
             best_alpha = 1 / best_params['C']
             print("best parameters: ", best_params)
             print("best alpha: ", best_alpha)
@@ -426,9 +445,7 @@ class Scorecard():
         # else, use grid search to find the best parameters
         else: 
             param_grid = {
-                'C': [2**i for i in range(-10, 8)],
-                'class_weight': ['balanced', None]#,
-                #'kernel': ['linear', 'rbf', 'poly', 'sigmoid']
+                'C': [2**i for i in range(-10, 10)]
             }
             best_params, best_score, results = self.grid_search(svm,  param_grid, cv=5)
             self.model = clone(svm)
@@ -437,14 +454,33 @@ class Scorecard():
             print("best parameters: ", best_params)
             print("best score: ", best_score)
 
-    # beyond l1 (MCP)
+    # beyond l1
     def beyond_l1(self):
-        self.model = GeneralizedLinearEstimator(
-            datafit=Huber(delta=1.),
-            penalty=MCPenalty(alpha=1e-2, gamma=3),
-            solver=AndersonCD()
-        )
-
+        beyond_l1 = GeneralizedLinearEstimator()
+        
+        if self.params is not None:
+            # put params in GeneralizedLinearEstimator
+            for key, value in self.params.items():
+                setattr(beyond_l1, key, value)
+            self.model = beyond_l1
+        
+        else:
+            param_grid = {
+                'datafit': [Huber(delta=1.)],
+                'penalty': [MCPenalty(alpha=1e-2, gamma=3), SCAD(alpha=1e-2, gamma=3)],
+                'solver': [AndersonCD()]
+            }
+            
+            best_params, best_score, results = self.grid_search(beyond_l1, param_grid, cv=5)
+            
+            new_model = GeneralizedLinearEstimator()
+            for key, value in best_params.items():
+                setattr(new_model, key, value)
+            self.model = new_model
+            
+            print("best parameters: ", best_params)
+            print("best score: ", best_score)
+        
     # adaptive lasso
     def adaptive_lasso(self):
         alasso = AdaptiveLasso(fit_intercept=False)
@@ -453,7 +489,7 @@ class Scorecard():
                 setattr(alasso, key, value)
             self.model = alasso
         else:
-            param_grid = {'alpha': np.logspace(-8, 2, 10)}
+            param_grid = {'alpha': np.logspace(-10, 2, 10)}
             best_params, best_score, results = self.grid_search(alasso, param_grid)
             self.model = clone(alasso)
             self.model.set_params(**best_params)
@@ -514,8 +550,8 @@ class Scorecard():
         
         return data        
 
-    def riskslim_predicted_risk(self, total_points, a):
-        return 1.0/(1.0 + np.exp(-(a + total_points)))
+    def riskslim_predicted_risk(self, total_points, intercept):
+        return 1.0/(1.0 + np.exp(-(intercept + total_points)))
 
     def riskslim_points(self, features, points_list):    
         total_points = 0.0
@@ -526,12 +562,13 @@ class Scorecard():
 
         return total_points
 
-    def riskslim_prediction(self, features, points_list, a):
+    def riskslim_prediction(self, features, points_list, intercept):
         total_points = self.riskslim_points(features, points_list)
-        return self.riskslim_predicted_risk(total_points, a)
+        return total_points
+        #return self.riskslim_predicted_risk(total_points, intercept)
 
 
-    def evaluate_riskslim_model(self, points_list, sbc_X, a):
+    def evaluate_riskslim_model(self, points_list, sbc_X, intercept):
         predictions = []
         
         # remove sbcol
@@ -541,10 +578,10 @@ class Scorecard():
 
         for i in range(sbc_X.shape[0]):
             features = sbc_X.iloc[i].values
-            prediction = self.riskslim_prediction(features, points_list, a)
+            prediction = self.riskslim_prediction(features, points_list, intercept)
             predictions.append(prediction)
             # round prediction to 0 or 1 based on threshold
-            if prediction >= 0.5:
+            if prediction >= intercept:
                 predictions[i] = 1
             else:
                 predictions[i] = 0
@@ -589,23 +626,24 @@ class Scorecard():
     def get_weights(self):
         # learn thresholds from the training data
         self.thresholds = self.get_thresholds(self.train_and_val_X, self.train_and_val_y)
-
+        
         # if ordinal problem, do sbc to get binary version
         if self.use_sbc:
             sbc = SBC()
             sbc_X, sbc_y = sbc.reduction(self.train_and_val_X, self.train_and_val_y, self.K, self.mapping)
 
             # do thresholds for sbc columns (the last K-2 columns from sbc_X, have one threshold each: 0.5)
-            sbc_columns = sbc_X.columns[-(sbc.K-2):]
+            sbc_columns = sbc_X.columns[-(self.K-2):]
             for col in sbc_columns:
                 self.thresholds[col] = [0.5]
                 
             self.train_and_val_X = sbc_X.copy()
             self.train_and_val_y = sbc_y.copy()
+            
 
         # get encoded version of training X
         self.encoded_train_X = self.get_encoded_X(self.train_and_val_X, self.thresholds)
-
+        
         # fit the model
         self.model.fit(self.encoded_train_X, np.ravel(self.train_and_val_y))
 
@@ -636,13 +674,14 @@ class Scorecard():
     # evaluate the model on the test set
     def evaluate(self):
         print("\nEvaluating the model on the test set...")
+        
         if self.use_sbc:
             sbc = SBC()
-            sbc_test_X, sbc_test_y = sbc.reduction(self.test_X, self.test_y, self.K, self.mapping)
+            sbc_test_X, _ = sbc.reduction(self.test_X, self.test_y, self.K, self.mapping)
             self.test_X = sbc_test_X.copy()
-        
-        encoded_test_X = self.get_encoded_X(self.test_X, self.thresholds)
 
+        encoded_test_X = self.get_encoded_X(self.test_X, self.thresholds)
+        
         # predict with the model
         test_predictions = self.model.predict(encoded_test_X)
         print("test predictions: ", test_predictions)
@@ -744,7 +783,6 @@ class Scorecard():
         for col in self.X.columns:
             # get the weights for the column
             col_weights = self.weights[self.weights['Feature'].str.contains(col)]
-            print(col_weights)
             #if col_weights.empty:
             #    continue
 
