@@ -290,6 +290,12 @@ class Scorecard():
             except Exception as e:
                 print(f"AdaptiveLasso infeasible: {e}")
                 return 0.0
+        elif self.model_method == "BEYOND_L1":
+            try:
+                estimator.fit(encoded_X, np.ravel(y))
+            except ZeroDivisionError as e:
+                print(f"BEYOND_L1 ZeroDivisionError: {e}")
+                return 0.0
         else:
             estimator.fit(encoded_X, np.ravel(y))
 
@@ -597,7 +603,10 @@ class Scorecard():
         recall = recall_score(y, predictions, average='weighted')
         f1 = f1_score(y, predictions, average='weighted')
         mse = mean_squared_error(y, predictions)
-        logistic_loss = np.mean(np.log(1 + np.exp(-predictions * y)))
+        # Ensure predictions and y are numeric for logistic loss calculation
+        predictions_numeric = pd.to_numeric(predictions, errors='coerce')
+        y_numeric = pd.to_numeric(y, errors='coerce')
+        logistic_loss = np.mean(np.log(1 + np.exp(-predictions_numeric * y_numeric)))
         print(f'accuracy: {accuracy}')
         print(f'balance accuracy: {balanced_accuracy}')
         print(f'precision: {precision}')
