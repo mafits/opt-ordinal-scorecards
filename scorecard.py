@@ -6,7 +6,7 @@ import matplotlib.colors as mcolors
 import re
 
 # evaluation 
-from sklearn.metrics import balanced_accuracy_score, mean_squared_error, roc_auc_score, accuracy_score, precision_score, recall_score, f1_score
+from sklearn.metrics import auc, balanced_accuracy_score, mean_squared_error, roc_auc_score, accuracy_score, precision_score, recall_score, f1_score
 from sklearn.model_selection import GridSearchCV, ParameterGrid, StratifiedKFold
 from sklearn.model_selection import train_test_split
 from sklearn.model_selection import learning_curve
@@ -695,11 +695,9 @@ class Scorecard():
         test_predictions = self.model.predict(encoded_test_X)
         print("test predictions: ", test_predictions)
         
-        if self.model_method == "ADAPTIVE_LASSO":
+        if self.model_method == "ADAPTIVE_LASSO" or self.model_method == "BEYOND_L1":
             # round weights in y_pred to closer integers
             test_predictions = (test_predictions >= 0.5).astype(int)
-        elif self.model_method == "BEYOND_L1":
-            test_predictions = np.round(test_predictions).astype(int)
         
         if self.use_sbc:
             # transform predictions to ordinal target
@@ -730,6 +728,10 @@ class Scorecard():
         # model size = number of non-zero weights / number of all weights
         model_size = num_non_zero_weights / number_of_features
         
+        if not(self.use_sbc):
+            auc = roc_auc_score(self.test_y, test_predictions)
+            print("auc: ", auc)
+
         print("accuracy: ", accuracy)
         print("precision: ", precision)
         print("recall: ", recall)
@@ -759,11 +761,9 @@ class Scorecard():
         #print(classification_report(self.test_y, test_predictions, zero_division=0))
         
         test_predictions_2 = self.model.predict(self.encoded_train_X)
-        
-        if self.model_method == "ADAPTIVE_LASSO":
+
+        if self.model_method == "ADAPTIVE_LASSO" or self.model_method == "BEYOND_L1":
             test_predictions_2 = (test_predictions_2 >= 0.5).astype(int)
-        elif self.model_method == "BEYOND_L1":
-            test_predictions_2 = np.round(test_predictions_2).astype(int)
 
         if self.use_sbc:
             # transform predictions to ordinal target
@@ -775,6 +775,9 @@ class Scorecard():
                 self.train_y_og = mapped_train_y.copy()
             
         print("\nEvaluating the model on the train set...")
+        if not self.use_sbc:
+            auc_train = roc_auc_score(self.train_y_og, test_predictions_2)
+            print("auc on train set: ", auc_train)
         print("accuracy on train set: ", accuracy_score(self.train_y_og, test_predictions_2))
         print("precision on train set: ", precision_score(self.train_y_og, test_predictions_2, average='weighted', zero_division=0))
         print("recall on train set: ", recall_score(self.train_y_og, test_predictions_2, average='weighted', zero_division=0))
