@@ -142,6 +142,8 @@ class Scorecard():
             return self.discretize_caim(X, y)
         elif self.thresholds_method == "INF_BINS":
             return self.discretize_infbins(X)
+        elif self.thresholds_method == "EXISTING":
+            return self.discretize_existing(X)
         else:
             raise ValueError(f"Unknown thresholds method: {self.thresholds_method}")
 
@@ -189,7 +191,20 @@ class Scorecard():
             
         return thresholds
 
-    
+
+    def discretize_existing(self, X):
+        pLBC_thresholds = [0.0174, 0.1012, 0.1707]
+        pBCE_thresholds = [0.0184, 0.3684, 0.9219]
+        cXb2_thresholds = [0.0140, 0.0267, 0.6881]
+        thresholds = {
+            'pLBC Value': pLBC_thresholds,
+            'pBCE Value': pBCE_thresholds,
+            'cX2b Value': cXb2_thresholds,
+            'pUNR Value': [],
+            'sbcol1': [0.5],
+            'sbcol2': [0.5]
+        }
+        return thresholds
     
     # encoding
     def get_encoded_X(self, X, thresholds):
@@ -362,6 +377,7 @@ class Scorecard():
                 
                 # get the score for the current fold
                 score = self.grid_search_scoring(model, train_X, train_y, val_X, val_y)
+                print("    score = ", score)
                 scores.append(score)
             
             # calculate the mean score for the current combination of parameters
@@ -709,7 +725,10 @@ class Scorecard():
                 self.test_y = mapped_test_y.copy()
         
         # show predictions vs true values side by side
-        results_df = pd.DataFrame({'True Value': self.test_y.values, 'Prediction': pd.Series(test_predictions).values})
+        results_df = pd.DataFrame({
+            'True Value': np.ravel(self.test_y.values),
+            'Prediction': np.ravel(test_predictions)
+        })
         print(results_df)
 
         # calculate and show metrics
@@ -718,7 +737,9 @@ class Scorecard():
         recall = recall_score(self.test_y, test_predictions, average='weighted', zero_division=0)
         f1 = f1_score(self.test_y, test_predictions, average='weighted', zero_division=0)
         balanced_accuracy = balanced_accuracy_score(self.test_y, test_predictions)
-        logistic_loss = np.mean(np.log(1 + np.exp(-test_predictions * self.test_y)))
+        y_pred_arr = np.ravel(test_predictions)
+        y_true_arr = np.ravel(self.test_y)
+        logistic_loss = np.mean(np.log(1 + np.exp(-y_pred_arr * y_true_arr)))
         mse = mean_squared_error(self.test_y, test_predictions)
         # number of far off predictions (more than 1 unit away from the true value)
         if self.use_sbc: far_off = np.sum(np.abs(test_predictions - self.test_y) > 1)
@@ -783,8 +804,10 @@ class Scorecard():
         print("recall on train set: ", recall_score(self.train_y_og, test_predictions_2, average='weighted', zero_division=0))
         print("f1 score on train set: ", f1_score(self.train_y_og, test_predictions_2, average='weighted', zero_division=0))
         print("balanced accuracy on train set: ", balanced_accuracy_score(self.train_y_og, test_predictions_2))
-        print("logistic loss on train set: ", np.mean(np.log(1 + np.exp(-test_predictions_2 * self.train_y_og))))
-        print("mse on train set: ", mean_squared_error(self.train_y_og, test_predictions_2))
+        y_pred_arr = np.ravel(test_predictions_2)
+        y_true_arr = np.ravel(self.train_y_og)
+        print("logistic loss on train set: ", np.mean(np.log(1 + np.exp(-y_pred_arr * y_true_arr))))
+        print("mse on train set: ", mean_squared_error(y_true_arr, y_pred_arr))
 
 
     def show_scorecard(self):
@@ -794,7 +817,7 @@ class Scorecard():
         scorecard_table = pd.DataFrame(columns=['Feature', 'Bin', 'Points'])
         for col in self.X.columns:
             # get the weights for the column
-            col_weights = self.weights[self.weights['Feature'].str.contains(col)]
+            col_weights = self.weights[self.weights['Feature'].str.startswith(f'feat{col}-bin')]
             #if col_weights.empty:
             #    continue
 
