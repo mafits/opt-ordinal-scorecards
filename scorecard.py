@@ -6,8 +6,8 @@ import matplotlib.colors as mcolors
 import re
 
 # evaluation 
-from sklearn.metrics import auc, balanced_accuracy_score, mean_squared_error, roc_auc_score, accuracy_score, precision_score, recall_score, f1_score
-from sklearn.model_selection import GridSearchCV, ParameterGrid, StratifiedKFold
+from sklearn.metrics import auc, balanced_accuracy_score, log_loss, mean_squared_error, roc_auc_score, accuracy_score, precision_score, recall_score, f1_score
+from sklearn.model_selection import GridSearchCV, ParameterGrid, RepeatedStratifiedKFold, StratifiedKFold
 from sklearn.model_selection import train_test_split
 from sklearn.model_selection import learning_curve
 from sklearn.metrics import confusion_matrix, classification_report
@@ -86,6 +86,8 @@ class Scorecard():
         self.goal_num_nonzero_weights = None
         self.accuracy = None
         self.show_prints = True        
+        
+        self.best_params = None
        
 
 
@@ -121,6 +123,8 @@ class Scorecard():
         self.test_X_og = self.test_X.copy()
         self.test_y_og = self.test_y.copy()
 
+        if params is not None:
+            self.best_params = params
         # model
         if model_method == "RSS": self.rss()
         elif model_method == "ML": self.max_likelihood()
@@ -388,7 +392,8 @@ class Scorecard():
             if mean_score > best_score:
                 best_score = mean_score
                 best_params = params
-            
+        
+        self.best_params = best_params
         return best_params, best_score, results
 
 
@@ -426,12 +431,12 @@ class Scorecard():
 
         # else, use grid search to find the best parameters
         else:
-            alpha_values = [0.001, 0.01, 0.1, 0.4, 0.6, 0.9, 0.99, 1.0]
+            alpha_values = [0.6, 0.9, 0.99, 1.0]
             param_grid = [
-                { 'solver': ['liblinear'], 
-                  'C': [1/a for a in alpha_values], 
-                  'penalty': ['l1']
-                },
+                #{ 'solver': ['liblinear'], 
+                #  'C': [1/a for a in alpha_values], 
+                #  'penalty': ['l1']
+                #},
                 { 'solver': ['saga'], 
                   'C': [1/a for a in alpha_values], 
                   'penalty': ['elasticnet'], 
@@ -808,6 +813,161 @@ class Scorecard():
         y_true_arr = np.ravel(self.train_y_og)
         print("logistic loss on train set: ", np.mean(np.log(1 + np.exp(-y_pred_arr * y_true_arr))))
         print("mse on train set: ", mean_squared_error(y_true_arr, y_pred_arr))
+
+
+    
+    def evaluate_repeat(self, n_repeats=5):        
+        test_metrics = {
+            "accuracy": [],
+            "balanced_accuracy": [],
+            "mse": [],
+            "model_size": [],
+            "num_non_zero_weights": [],
+            "precision": [],
+            "recall": [],
+            "f1": [],
+            "logistic_loss": []
+        }
+
+        train_metrics = {
+            "accuracy": [],
+            "precision": [],
+            "recall": [],
+            "f1": [],
+            "balanced_accuracy": [],
+            "logistic_loss": [],
+            "mse": [],
+            "num_non_zero_weights": [],
+            "model_size": []
+        }
+        
+        X_train = self.train_and_val_X.copy()
+        y_train = self.train_and_val_y.copy()
+        X_test = self.test_X.copy()
+        y_test = self.test_y.copy()
+
+
+        if self.use_sbc:
+            sbc = SBC()
+            sbc_X_test, _ = sbc.reduction(X_test, y_test, self.K, self.mapping)
+            X_test = sbc_X_test.copy()
+
+        encoded_X_train = self.get_encoded_X(X_train, self.thresholds)
+        encoded_X_test = self.get_encoded_X(X_test, self.thresholds)
+
+        for i in range(n_repeats):
+            X_train = self.train_and_val_X.copy()
+            y_train = self.train_and_val_y.copy()
+            X_test = self.test_X.copy()
+            y_test = self.test_y.copy()
+            # clone and fit the model
+            if self.model_method == "BEYOND_L1":
+                    self.model = GeneralizedLinearEstimator()
+                    for key, value in self.best_params.items():
+                        setattr(self.model, key, value)
+            else:
+                self.model = clone(self.model)
+            self.model.fit(encoded_X_train, np.ravel(y_train))
+
+            if self.model_method == "BEYOND_L1":
+                weights = self.model.coef_.ravel()
+            elif self.model_method == "ADAPTIVE_LASSO":
+                weights = self.model.coef_
+                weights[np.abs(weights) < 1e-18] = 0
+            else:
+                weights = self.model.coef_[0]
+
+            weights_series = pd.Series(weights)
+            num_non_zero_weights = np.sum(weights_series != 0)
+            number_of_features = len(weights_series)
+            model_size = num_non_zero_weights / number_of_features
+
+            test_predictions = self.model.predict(encoded_X_test)
+            if self.model_method == "ADAPTIVE_LASSO" or self.model_method == "BEYOND_L1":
+                test_predictions = (test_predictions >= 0.5).astype(int)
+            
+            if self.use_sbc:
+                # transform predictions to ordinal target
+                test_predictions = sbc.classif(test_predictions)
+                if self.mapping is not None:
+                    mapped_test_predictions = sbc.apply_mapping(pd.Series(test_predictions), self.mapping)
+                    mapped_test_y = sbc.apply_mapping(y_test, self.mapping)
+                    test_predictions = mapped_test_predictions.copy()
+                    y_test = mapped_test_y.copy()
+            
+            accuracy = accuracy_score(y_test, test_predictions)
+            precision = precision_score(y_test, test_predictions, average='weighted', zero_division=0)
+            recall = recall_score(y_test, test_predictions, average='weighted', zero_division=0)
+            f1 = f1_score(y_test, test_predictions, average='weighted', zero_division=0)
+            balanced_accuracy = balanced_accuracy_score(y_test, test_predictions)
+            #logistic_loss = log_loss(y_test, test_predictions)
+            mse = mean_squared_error(y_test, test_predictions)
+
+            test_metrics["accuracy"].append(accuracy)
+            test_metrics["balanced_accuracy"].append(balanced_accuracy)
+            test_metrics["mse"].append(mse)
+            test_metrics["model_size"].append(model_size)
+            test_metrics["num_non_zero_weights"].append(num_non_zero_weights)
+            test_metrics["precision"].append(precision)
+            test_metrics["recall"].append(recall)
+            test_metrics["f1"].append(f1)
+            #test_metrics["logistic_loss"].append(logistic_loss)
+
+            # now, for train
+            train_predictions = self.model.predict(encoded_X_train)
+            if self.model_method == "ADAPTIVE_LASSO" or self.model_method == "BEYOND_L1":
+                train_predictions = (train_predictions >= 0.5).astype(int)
+                
+            if self.use_sbc:
+                # transform predictions to ordinal target
+                sbc = SBC()
+                train_predictions = sbc.classif(train_predictions, self.K)
+                y_train = self.train_y_og
+                if self.mapping is not None:
+                    #mapped_train_predictions = sbc.apply_mapping(pd.Series(train_predictions), self.mapping)
+                    #train_predictions = mapped_train_predictions.copy()
+                    mapped_train_y = sbc.apply_mapping(self.train_y_og, self.mapping)
+                    y_train = mapped_train_y.copy()
+
+            # compute train metrics
+            train_accuracy = accuracy_score(y_train, train_predictions)
+            train_precision = precision_score(y_train, train_predictions, average='weighted', zero_division=0)
+            train_recall = recall_score(y_train, train_predictions, average='weighted', zero_division=0)
+            train_f1 = f1_score(y_train, train_predictions, average='weighted', zero_division=0)
+            train_balanced_accuracy = balanced_accuracy_score(y_train, train_predictions)
+            #train_logistic_loss = log_loss(y_train, train_predictions)
+            train_mse = mean_squared_error(y_train, train_predictions)
+            train_num_non_zero_weights = np.sum(self.model.coef_ != 0)
+            train_model_size = train_num_non_zero_weights / X_train.shape[1]
+
+            # store train metrics
+            train_metrics["accuracy"].append(train_accuracy)
+            train_metrics["precision"].append(train_precision)
+            train_metrics["recall"].append(train_recall)
+            train_metrics["f1"].append(train_f1)
+            train_metrics["balanced_accuracy"].append(train_balanced_accuracy)
+            #train_metrics["logistic_loss"].append(train_logistic_loss)
+            train_metrics["mse"].append(train_mse)
+            train_metrics["num_non_zero_weights"].append(train_num_non_zero_weights)
+            train_metrics["model_size"].append(train_model_size)
+
+        # compute mean and std for each metric
+        print("Test")
+        for key in test_metrics:
+            test_metrics[key] = [np.mean(test_metrics[key]), np.std(test_metrics[key])]
+            if key in ["accuracy", "balanced_accuracy", "model_size"]:
+                print(f" {key}: {test_metrics[key][0] * 100:.2f} ± {test_metrics[key][1] * 100:.2f}")
+            elif key in ["mse", "num_non_zero_weights"]:
+                print(f" {key}: {test_metrics[key][0]:.3f} ± {test_metrics[key][1]:.3f}")
+            else:
+                print(f" {key}: {test_metrics[key]}")
+        print("\nTrain")
+        for key in train_metrics:
+            train_metrics[key] = [np.mean(train_metrics[key]), np.std(train_metrics[key])]
+            if key in ["accuracy", "balanced_accuracy"]:
+                print(f" {key}: {train_metrics[key][0] * 100:.2f} ± {train_metrics[key][1] * 100:.2f}")
+            else:
+                print(f" {key}: {train_metrics[key]}")
 
 
     def show_scorecard(self):
